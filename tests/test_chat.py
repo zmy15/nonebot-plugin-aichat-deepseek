@@ -42,6 +42,28 @@ def make_private_event(text: str, *, self_id: int = 1, user_id: int = 2):
     )
 
 
+def make_image_event(*segments, self_id: int = 1, user_id: int = 2):
+    from nonebot.adapters.onebot.v11 import Message
+    from nonebot.adapters.onebot.v11.event import PrivateMessageEvent, Sender
+
+    message = Message(segments)
+    return PrivateMessageEvent(
+        time=0,
+        self_id=self_id,
+        post_type="message",
+        sub_type="friend",
+        user_id=user_id,
+        message_type="private",
+        message_id=1,
+        message=message,
+        original_message=message,
+        raw_message="[CQ:image]",
+        font=0,
+        sender=Sender(user_id=user_id),
+        to_me=True,
+    )
+
+
 async def test_reply_keeps_context(monkeypatch: pytest.MonkeyPatch) -> None:
     from nonebot_plugin_aichat_deepseek import chat as chat_module
 
@@ -394,3 +416,94 @@ async def test_reply_tool_can_save_memory(
     assert "【用户长期记忆】" in messages[0]["content"]
     assert "喜欢猫" in messages[0]["content"]
     assert sent == ["记住了"]
+
+
+async def test_reply_with_image_uploads_and_sends(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from nonebot_plugin_aichat_deepseek import chat as chat_module
+    from nonebot_plugin_aichat_deepseek.images import ImagePayload
+
+    png = b"\x89PNG\r\n\x1a\n" + b"0" * 16
+
+    class ImageClient:
+        configured = True
+
+        def __init__(self) -> None:
+            self.uploaded: list[tuple[bytes, str, str]] = []
+            self.messages: list[dict] | None = None
+
+        async def upload_image(
+            self, data: bytes, filename: str, content_type: str
+        ) -> str:
+            self.uploaded.append((data, filename, content_type))
+            return "file-api-test"
+
+        async def chat_with_tools(
+            self, messages, *, tools, tool_runner, max_tool_rounds
+        ) -> str:
+            self.messages = messages
+            return "图片里是一只猫"
+
+    fake = ImageClient()
+
+    async def fake_fetch_image(segment, **kwargs) -> ImagePayload:
+        return ImagePayload(png, "cat.png", "image/png")
+
+    monkeypatch.setattr(chat_module, "client", fake)
+    monkeypatch.setattr(chat_module, "fetch_image", fake_fetch_image)
+    chat_module.store.clear("6:6")
+
+    sent: list[str] = []
+
+    async def send(message: str) -> None:
+        sent.append(message)
+
+    await chat_module.reply(
+        "6:6",
+        "看看这个",
+        send,
+        images=[{"url": "https://example.com/cat.png"}],
+    )
+
+    assert fake.uploaded == [(png, "cat.png", "image/png")]
+    assert fake.messages is not None
+    user_message = fake.messages[-1]
+    assert user_message["content"] == [
+        {"type": "text", "text": "看看这个"},
+        {"type": "file", "file_id": "file-api-test"},
+    ]
+
+    stored = chat_module.store.build_messages("6:6")
+    assert "（用户发送了 1 张图片）" in stored[0]["content"]
+    assert sent == ["图片里是一只猫"]
+
+
+async def test_process_private_message_passes_image(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from nonebot.adapters.onebot.v11 import MessageSegment
+
+    from nonebot_plugin_aichat_deepseek import chat as chat_module
+
+    captured: dict = {}
+
+    async def fake_reply(session_key, text, send, images=None) -> None:
+        captured["session_key"] = session_key
+        captured["text"] = text
+        captured["images"] = images
+
+    monkeypatch.setattr(chat_module, "reply", fake_reply)
+
+    event = make_image_event(
+        MessageSegment.image("https://example.com/cat.png")
+    )
+
+    async def send(message: str) -> None:
+        pass
+
+    await chat_module.process_private_message(event, send)
+
+    assert captured["session_key"] == "1:2"
+    assert captured["text"] == ""
+    assert len(captured["images"]) == 1

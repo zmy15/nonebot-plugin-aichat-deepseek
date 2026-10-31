@@ -48,6 +48,7 @@ class DeepSeekClient:
         temperature: float = 1.0,
         max_tokens: int | None = None,
         thinking: bool | None = None,
+        image_expire_seconds: int = 86400,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         self._api_key = api_key
@@ -57,6 +58,7 @@ class DeepSeekClient:
         self._temperature = temperature
         self._max_tokens = max_tokens
         self._thinking = thinking
+        self._image_expire_seconds = image_expire_seconds
         self._transport = transport
 
     @property
@@ -178,14 +180,66 @@ class DeepSeekClient:
             logger.debug(f"DeepSeek token 用量：{usage}")
         return data
 
-    async def chat(self, messages: Sequence[ChatMessage]) -> str:
+    async def chat(self, messages: Sequence[Mapping[str, Any]]) -> str:
         """发送对话消息并返回模型回复文本。"""
         data = await self._request(messages)
         return self._extract_content(data)
 
+    async def upload_image(
+        self,
+        image_data: bytes,
+        filename: str,
+        content_type: str,
+    ) -> str:
+        """通过 Files API 上传图片，返回可引用到对话中的 file_id。"""
+        if not self._api_key:
+            raise DeepSeekError("未配置 DEEPSEEK_API_KEY")
+
+        url = f"{self._api_base.rstrip('/')}/files"
+        headers = {"Authorization": f"Bearer {self._api_key}"}
+        form: dict[str, str] = {"purpose": "user_data"}
+        if self._image_expire_seconds > 0:
+            if not 3600 <= self._image_expire_seconds <= 2592000:
+                raise DeepSeekError(
+                    "图片文件有效期必须为 0 或 3600-2592000 秒"
+                )
+            form["expires_after[anchor]"] = "created_at"
+            form["expires_after[seconds]"] = str(self._image_expire_seconds)
+
+        try:
+            async with httpx.AsyncClient(
+                timeout=max(self._timeout, 300.0),
+                transport=self._transport,
+            ) as client:
+                response = await client.post(
+                    url,
+                    headers=headers,
+                    data=form,
+                    files={
+                        "file": (filename, image_data, content_type),
+                    },
+                )
+        except httpx.TimeoutException as exc:
+            raise DeepSeekError("上传图片到 DeepSeek 超时") from exc
+        except httpx.HTTPError as exc:
+            raise DeepSeekError(
+                f"上传图片失败：{exc.__class__.__name__}"
+            ) from exc
+
+        data = self._parse_json(response)
+        if response.status_code >= 400:
+            raise DeepSeekError(
+                self._error_detail(response, data),
+                status_code=response.status_code,
+            )
+        file_id = data.get("id") if isinstance(data, dict) else None
+        if not isinstance(file_id, str) or not file_id:
+            raise DeepSeekError("DeepSeek Files API 没有返回 file_id")
+        return file_id
+
     async def chat_with_tools(
         self,
-        messages: Sequence[ChatMessage],
+        messages: Sequence[Mapping[str, Any]],
         *,
         tools: Sequence[Mapping[str, Any]],
         tool_runner: ToolRunner,

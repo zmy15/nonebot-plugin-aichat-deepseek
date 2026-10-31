@@ -35,6 +35,21 @@ class Config(BaseModel):
     deepseek_memory_max_items: int = Field(default=20, ge=1, le=50)
     deepseek_memory_max_chars: int = Field(default=1000, ge=1)
 
+    # 图片理解（Files API）
+    deepseek_image_enabled: bool = True
+    deepseek_image_max_bytes: int = Field(
+        default=64 * 1024 * 1024,
+        ge=1,
+    )
+    deepseek_image_max_count: int = Field(default=4, ge=1)
+    deepseek_image_timeout: float = Field(default=60.0, gt=0)
+    # 0 表示不设置过期时间（永久有效）
+    deepseek_image_expire_seconds: int = Field(
+        default=86400,
+        ge=0,
+        le=2592000,
+    )
+
     # 生成参数
     deepseek_system_prompt: str = (
         "你是一个乐于助人的 AI 助手，请使用简体中文回答用户的问题。"

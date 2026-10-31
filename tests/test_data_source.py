@@ -368,3 +368,85 @@ async def test_tool_runner_error_is_reported_to_model(ds) -> None:
     tool_message = requests[1]["messages"][-1]
     assert tool_message["role"] == "tool"
     assert "执行失败" in tool_message["content"]
+
+
+async def test_upload_image_uses_files_api(ds) -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"id": "file-api-test"})
+
+    client = make_client(
+        ds.DeepSeekClient,
+        handler,
+        image_expire_seconds=3600,
+    )
+    file_id = await client.upload_image(
+        b"\x89PNG\r\n\x1a\n" + b"0" * 16,
+        "cat.png",
+        "image/png",
+    )
+
+    assert file_id == "file-api-test"
+    request = requests[0]
+    assert request.method == "POST"
+    assert str(request.url) == "https://api.deepseek.com/files"
+    assert request.headers["Authorization"] == "Bearer sk-test"
+
+    body = request.content
+    assert b'name="purpose"' in body
+    assert b"user_data" in body
+    assert b'name="expires_after[anchor]"' in body
+    assert b'name="expires_after[seconds]"' in body
+    assert b'filename="cat.png"' in body
+
+
+async def test_upload_image_can_be_permanent(ds) -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"id": "file-api-test"})
+
+    client = make_client(
+        ds.DeepSeekClient,
+        handler,
+        image_expire_seconds=0,
+    )
+    await client.upload_image(b"\x89PNG\r\n\x1a\n", "a.png", "image/png")
+
+    assert b"expires_after" not in requests[0].content
+
+
+async def test_upload_image_error(ds) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            400,
+            json={"error": {"message": "invalid image"}},
+        )
+
+    client = make_client(ds.DeepSeekClient, handler)
+    with pytest.raises(ds.DeepSeekError) as exc_info:
+        await client.upload_image(b"not-image", "a.png", "image/png")
+
+    assert exc_info.value.status_code == 400
+    assert "invalid image" in str(exc_info.value)
+
+
+async def test_upload_image_rejects_invalid_expiry(ds) -> None:
+    called = False
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal called
+        called = True
+        return httpx.Response(200, json={"id": "file-api-test"})
+
+    client = make_client(
+        ds.DeepSeekClient,
+        handler,
+        image_expire_seconds=60,
+    )
+    with pytest.raises(ds.DeepSeekError, match="有效期"):
+        await client.upload_image(b"\x89PNG\r\n\x1a\n", "a.png", "image/png")
+    assert called is False

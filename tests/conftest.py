@@ -41,3 +41,10 @@ def tools_mod():
 
     return module
 
+
+@pytest.fixture
+def images_mod():
+    import nonebot_plugin_aichat_deepseek.images as module
+
+    return module
+

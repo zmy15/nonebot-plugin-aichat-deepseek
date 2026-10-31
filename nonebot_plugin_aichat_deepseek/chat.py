@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import random
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import datetime
 from typing import Any
 
@@ -21,6 +21,7 @@ from .config import plugin_config
 from .data_source import ChatMessage, DeepSeekClient, DeepSeekError
 from .formatting import split_reply, strip_markdown
 from .history import UTC8, ConversationStore
+from .images import ImageError, fetch_image
 from .tools import (
     MEMORY_CATEGORY_LABELS,
     build_tool_definitions,
@@ -30,6 +31,7 @@ from .tools import (
 Sender = Callable[[str], Awaitable[None]]
 
 MISSING_API_KEY_TIP = "还没有配置 DEEPSEEK_API_KEY，请先在 .env 中填写后再试。"
+IMAGE_DISABLED_TIP = "图片理解功能还没有开启。"
 EMPTY_REPLY_TIP = "……"
 SUMMARY_SYSTEM_PROMPT = (
     "你是一个对话摘要助手。请把用户与 AI 的对话压缩成一段简洁的中文摘要，"
@@ -44,6 +46,7 @@ client = DeepSeekClient(
     temperature=plugin_config.deepseek_temperature,
     max_tokens=plugin_config.deepseek_max_tokens,
     thinking=plugin_config.deepseek_thinking,
+    image_expire_seconds=plugin_config.deepseek_image_expire_seconds,
 )
 
 store = ConversationStore(
@@ -157,8 +160,13 @@ def _build_system_prompt(
     return prompt
 
 
-def _build_request_messages(session_key: str, text: str) -> list[ChatMessage]:
-    messages = store.build_messages(session_key)
+def _build_request_messages(
+    session_key: str,
+    user_content: str | list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    messages: list[dict[str, Any]] = [
+        dict(message) for message in store.build_messages(session_key)
+    ]
     summary = store.get_summary(session_key)
     memories: list[dict[str, Any]] = []
     if plugin_config.deepseek_memory_enabled:
@@ -173,7 +181,7 @@ def _build_request_messages(session_key: str, text: str) -> list[ChatMessage]:
             "content": _build_system_prompt(summary, memories),
         },
     )
-    messages.append({"role": "user", "content": text})
+    messages.append({"role": "user", "content": user_content})
     return messages
 
 
@@ -233,8 +241,54 @@ async def compress_if_needed(session_key: str) -> None:
     logger.info(f"已压缩 {len(batch)} 条历史消息：{session_key}")
 
 
-async def _generate_reply_locked(session_key: str, text: str) -> str:
-    messages = _build_request_messages(session_key, text)
+async def _generate_reply_locked(
+    session_key: str,
+    text: str,
+    images: Sequence[Mapping[str, Any]] | None = None,
+) -> str:
+    history_text = text
+
+    if images:
+        if len(images) > plugin_config.deepseek_image_max_count:
+            raise ImageError(
+                f"一次最多发送 {plugin_config.deepseek_image_max_count} 张图片"
+            )
+
+        payloads = []
+        for segment in images:
+            payloads.append(
+                await fetch_image(
+                    segment,
+                    timeout=plugin_config.deepseek_image_timeout,
+                    max_bytes=plugin_config.deepseek_image_max_bytes,
+                )
+            )
+
+        file_ids = []
+        for payload in payloads:
+            file_ids.append(
+                await client.upload_image(
+                    payload.data,
+                    payload.filename,
+                    payload.content_type,
+                )
+            )
+
+        prompt = text or (
+            "请描述这张图片。" if len(payloads) == 1 else "请描述这些图片。"
+        )
+        user_content: list[dict[str, Any]] = [
+            {"type": "text", "text": prompt}
+        ]
+        user_content.extend(
+            {"type": "file", "file_id": file_id} for file_id in file_ids
+        )
+        messages = _build_request_messages(session_key, user_content)
+
+        marker = f"（用户发送了 {len(payloads)} 张图片）"
+        history_text = f"{text}\n{marker}".strip() if text else marker
+    else:
+        messages = _build_request_messages(session_key, text)
 
     if plugin_config.deepseek_tools_enabled:
 
@@ -252,17 +306,26 @@ async def _generate_reply_locked(session_key: str, text: str) -> str:
     else:
         answer = await client.chat(messages)
 
-    store.add_turn(session_key, text, answer)
+    store.add_turn(session_key, history_text, answer)
     return answer
 
 
-async def generate_reply(session_key: str, text: str) -> str:
+async def generate_reply(
+    session_key: str,
+    text: str,
+    images: Sequence[Mapping[str, Any]] | None = None,
+) -> str:
     """携带上下文请求模型，成功后把本轮问答写入历史。"""
     async with store.lock(session_key):
-        return await _generate_reply_locked(session_key, text)
+        return await _generate_reply_locked(session_key, text, images)
 
 
-async def reply(session_key: str, text: str, send: Sender) -> None:
+async def reply(
+    session_key: str,
+    text: str,
+    send: Sender,
+    images: Sequence[Mapping[str, Any]] | None = None,
+) -> None:
     """生成回复并发送；出错时回复一条可读的错误提示。"""
     if not client.configured:
         await send(MISSING_API_KEY_TIP)
@@ -270,7 +333,11 @@ async def reply(session_key: str, text: str, send: Sender) -> None:
 
     async with store.lock(session_key):
         try:
-            answer = await _generate_reply_locked(session_key, text)
+            answer = await _generate_reply_locked(session_key, text, images)
+        except ImageError as exc:
+            logger.warning(f"图片处理失败：{exc}")
+            await send(f"图片处理失败：{exc}")
+            return
         except DeepSeekError as exc:
             logger.warning(
                 f"DeepSeek 调用失败（status={exc.status_code}）：{exc.message}"
@@ -306,11 +373,23 @@ async def reply(session_key: str, text: str, send: Sender) -> None:
 
 async def process_private_message(event: PrivateMessageEvent, send: Sender) -> None:
     text = event.get_plaintext().strip()
-    if not text or event.user_id == event.self_id:
+    images = [
+        segment.data for segment in event.message if segment.type == "image"
+    ]
+
+    if images and not plugin_config.deepseek_image_enabled:
+        if not text:
+            await send(IMAGE_DISABLED_TIP)
+            return
+        images = []
+
+    if not text and not images:
         return
-    if _starts_with_command(text):
+    if event.user_id == event.self_id:
         return
-    await reply(_session_key(event), text, send)
+    if text and _starts_with_command(text):
+        return
+    await reply(_session_key(event), text, send, images=images)
 
 
 @private_chat.handle()

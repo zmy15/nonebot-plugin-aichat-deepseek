@@ -11,6 +11,7 @@
 - 当前上下文持久化到 SQLite，启动时自动加载历史
 - 历史聊天记录复用同一数据库，模型可调用 `query_chat_history` 查询过去聊过什么
 - 长期记忆：自动保存用户信息、偏好、习惯等，并在后续对话中注入 system 指令
+- 支持私聊图片理解：图片经 Files API 上传后以 `file_id` 交给 `deepseek-flash` 分析
 - 未压缩消息超过 30 轮时，自动把最早 20 条消息压缩成摘要，放到 system 指令之后
 - 自动移除 Markdown 标记，只发送纯文本
 - 模型用 `|||` 分隔多条消息，插件按随机间隔逐条发送，更像真人聊天
@@ -45,6 +46,9 @@ DEEPSEEK_TOOL_MAX_ROUNDS=3
 DEEPSEEK_MEMORY_ENABLED=true
 DEEPSEEK_MEMORY_MAX_ITEMS=20
 DEEPSEEK_MEMORY_MAX_CHARS=1000
+DEEPSEEK_IMAGE_ENABLED=true
+DEEPSEEK_IMAGE_MAX_COUNT=4
+DEEPSEEK_IMAGE_EXPIRE_SECONDS=86400
 DEEPSEEK_HISTORY_TURNS=30
 DEEPSEEK_COMPRESSION_TRIGGER_TURNS=30
 DEEPSEEK_COMPRESSION_BATCH_MESSAGES=20
@@ -63,6 +67,11 @@ DEEPSEEK_REPLY_INTERVAL=1.0
 | `DEEPSEEK_MEMORY_ENABLED` | `bool` | `True` | 是否启用长期记忆的保存、查询和注入 |
 | `DEEPSEEK_MEMORY_MAX_ITEMS` | `int` | `20` | 每次最多注入多少条长期记忆 |
 | `DEEPSEEK_MEMORY_MAX_CHARS` | `int` | `1000` | 注入长期记忆的字符预算 |
+| `DEEPSEEK_IMAGE_ENABLED` | `bool` | `True` | 是否启用私聊图片理解 |
+| `DEEPSEEK_IMAGE_MAX_BYTES` | `int` | `67108864` | 单张图片最大字节数（64 MiB） |
+| `DEEPSEEK_IMAGE_MAX_COUNT` | `int` | `4` | 单条消息最多处理几张图片 |
+| `DEEPSEEK_IMAGE_TIMEOUT` | `float` | `60.0` | 下载图片超时（秒） |
+| `DEEPSEEK_IMAGE_EXPIRE_SECONDS` | `int` | `86400` | 上传文件有效期（秒），`0` 表示永久有效 |
 | `DEEPSEEK_TIMEOUT` | `float` | `60.0` | 单次请求超时（秒） |
 | `DEEPSEEK_SYSTEM_PROMPT` | `str` | 内置中文助手提示词 | 人设提示词；插件会自动追加纯文本与分隔符输出要求 |
 | `DEEPSEEK_TEMPERATURE` | `float` | `1.0` | 采样温度，范围 0–2 |
@@ -95,6 +104,26 @@ DEEPSEEK_REPLY_INTERVAL=1.0
 插件会自动在系统提示词后追加输出约束：模型只输出纯文本，并用 `|||` 把回复拆成多条短消息。发送前还会移除残留的 Markdown 标记，并按照配置的间隔逐条发送，模拟真人分条聊天的节奏。可以通过 `DEEPSEEK_SPLIT_DELIMITER` 更换分隔符，或把 `DEEPSEEK_REPLY_INTERVAL` 设为 `0` 关闭间隔。
 
 群聊中发送的消息不会触发本插件；以 `/` 开头的消息会交给命令处理器，不会进入对话。
+
+## 图片理解
+
+私聊可以直接发送图片，也可以图片加文字一起发送。
+
+处理流程：
+
+1. 从 OneBot `image` 消息段的 `url` / `file` 字段获取图片，支持 http(s) URL、本地路径、`file://`、`base64://` 和 data URL；
+2. 按文件实际内容校验格式：JPEG、PNG、GIF、WebP；
+3. 通过 [Files API](https://api-docs.deepseek.com/zh-cn/guides/files_api) 的 `POST /files` 上传，`purpose=user_data`，得到 `file_id`；
+4. 在当前 user 消息中放入 `{"type": "file", "file_id": "..."}` 内容块；
+5. 图片只随当前请求发送，历史中保存“用户发送了 N 张图片”的标记，不会重复上传。
+
+注意：
+
+- 图片理解目前只有 `deepseek-flash` 支持，`deepseek-v4-pro` 不支持图像输入；
+- 单张图片最大 64 MiB，单条消息默认最多 4 张；
+- 只发图片不配文字时，插件会自动使用“请描述这张图片/这些图片”作为提示；
+- 上传文件默认 24 小时后过期，可通过 `DEEPSEEK_IMAGE_EXPIRE_SECONDS=0` 改为永久有效；
+- 格式和限制参考 [图像理解](https://api-docs.deepseek.com/zh-cn/guides/vision)。
 
 ## 数据存储与上下文压缩
 
@@ -193,6 +222,8 @@ pytest
 - [NoneBot2 插件编写文档](https://nonebot.dev/docs/tutorial/create-plugin)
 - [DeepSeek Chat Completions API](https://api-docs.deepseek.com/zh-cn/api/create-chat-completion)
 - [DeepSeek Tool Calls](https://api-docs.deepseek.com/zh-cn/guides/tool_calls)
+- [DeepSeek Files API](https://api-docs.deepseek.com/zh-cn/guides/files_api)
+- [DeepSeek 图像理解](https://api-docs.deepseek.com/zh-cn/guides/vision)
 
 ## 许可协议
 

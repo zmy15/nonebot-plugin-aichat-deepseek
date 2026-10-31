@@ -1,6 +1,6 @@
 [project]
 name = "nonebot-plugin-aichat-deepseek"
-version = "0.6.0"
+version = "0.7.0"
 description = "基于 DeepSeek API 的 NoneBot2 私聊对话插件"
 readme = "README.md"
 license = { text = "MIT" }
