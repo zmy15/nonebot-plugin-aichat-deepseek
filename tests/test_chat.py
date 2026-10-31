@@ -427,6 +427,13 @@ def test_system_prompt_contains_output_rules() -> None:
     assert "query_chat_history" in prompt
     assert "save_user_memory" in prompt
     assert "UTC+8" in prompt
+    assert "主动戳一戳" in prompt
+    assert "戳回去" in prompt
+    assert "不要等用户" in prompt
+    assert "主动调用 send_sticker" in prompt
+    assert "把表情包当成日常表达方式之一" in prompt
+    assert "不要连续频繁发送表情包" not in prompt
+    assert "不要频繁、无故" not in prompt
 
 
 def test_format_error() -> None:

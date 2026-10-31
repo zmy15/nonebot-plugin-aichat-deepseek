@@ -15,7 +15,7 @@ DEFINITION = make_definition(
     NAME,
     "从当前用户的表情库中查找并发送一个表情包。"
     "sticker_id 和 keyword 至少提供一个，优先使用 sticker_id。"
-    "只在确实找到匹配的表情包时发送；不要连续频繁发送。",
+    "不要等用户明确要求，聊天中可以根据情绪主动发送合适的表情包。",
     {
         "sticker_id": {
             "type": "integer",

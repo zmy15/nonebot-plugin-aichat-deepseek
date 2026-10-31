@@ -41,6 +41,10 @@ MISSING_API_KEY_TIP = "还没有配置 DEEPSEEK_API_KEY，请先在 .env 中填�
 IMAGE_DISABLED_TIP = "图片理解功能还没有开启。"
 EMPTY_REPLY_TIP = "……"
 POKE_PROMPT = "（对方戳了你一下，请用一句简短自然的话回应）"
+POKE_BACK_PROMPT = (
+    "（对方戳了你一下，请用一句简短自然的话回应；"
+    "也可以调用 poke_user 戳回去。）"
+)
 COMPLETENESS_SYSTEM_PROMPT = (
     "你是一个消息完整性判断器。用户可能把同一句话拆成多条发送。\n"
     "下面会给出最近对话和当前拼接后的用户消息。"
@@ -262,8 +266,9 @@ def _build_system_prompt(
         and plugin_config.deepseek_poke_enabled
     ):
         rules += (
-            "\n用户明确要求你戳一戳、提醒他或互动时，调用 poke_user；"
-            "不要频繁、无故戳用户。"
+            "\n用户要求你戳一戳、提醒或互动时，调用 poke_user；"
+            "不要等用户开口，聊天气氛合适时主动戳一戳；"
+            "用户戳你时，也可以戳回去。"
         )
 
     if (
@@ -275,9 +280,10 @@ def _build_system_prompt(
             "表情包 ID。如果你能根据图片判断它表达的情绪或含义，"
             "调用 describe_sticker 记录一两个词的简短含义；"
             "用户说明了含义时以用户说明为准。"
-            "用户想发表情包、或对话情绪合适时，"
-            "可以先调用 search_stickers 查看，再调用 send_sticker 发送；"
-            "不要连续频繁发送表情包。"
+            "不要等用户明确要求，聊天中可以根据情绪主动调用 "
+            "send_sticker 发送合适的表情包，"
+            "把表情包当成日常表达方式之一；"
+            "不确定有哪些表情可选时，先调用 search_stickers 查看。"
         )
 
     prompt = f"{persona}\n\n{rules}" if persona else rules
@@ -703,7 +709,13 @@ async def process_private_poke(event: PokeNotifyEvent, send: Sender) -> None:
     logger.info(
         f"[chat] poke session={session_key} target={event.target_id}"
     )
-    await reply(session_key, POKE_PROMPT, send)
+    prompt = (
+        POKE_BACK_PROMPT
+        if plugin_config.deepseek_tools_enabled
+        and plugin_config.deepseek_poke_enabled
+        else POKE_PROMPT
+    )
+    await reply(session_key, prompt, send)
 
 
 async def clear_user_context(session_key: str) -> None:

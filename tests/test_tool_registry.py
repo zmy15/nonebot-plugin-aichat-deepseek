@@ -32,3 +32,14 @@ def test_each_tool_is_self_contained(tools_mod) -> None:
         tool["function"]["name"] for tool in tools_mod.TOOL_DEFINITIONS
     ]
     assert definitions == names
+
+    descriptions = {
+        tool["function"]["name"]: tool["function"]["description"]
+        for tool in tools_mod.TOOL_DEFINITIONS
+    }
+    assert "不要连续频繁" not in descriptions["send_sticker"]
+    assert "不要频繁" not in descriptions["poke_user"]
+    assert "主动戳一戳" in descriptions["poke_user"]
+    assert "戳回去" in descriptions["poke_user"]
+    assert "不要等用户" in descriptions["poke_user"]
+    assert "主动发送" in descriptions["send_sticker"]

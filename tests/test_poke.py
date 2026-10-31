@@ -43,8 +43,30 @@ async def test_process_private_poke_replies(monkeypatch) -> None:
     await chat.process_private_poke(make_poke(), send)
 
     assert captured["session_key"] == "1:2"
-    assert captured["text"] == chat.POKE_PROMPT
+    assert captured["text"] == chat.POKE_BACK_PROMPT
     assert captured["images"] is None
+
+
+async def test_process_private_poke_without_tools_uses_base_prompt(
+    monkeypatch,
+) -> None:
+    from nonebot_plugin_aichat_deepseek import chat
+    from nonebot_plugin_aichat_deepseek.config import plugin_config
+
+    captured: dict = {}
+
+    async def fake_reply(session_key, text, send, images=None) -> None:
+        captured["text"] = text
+
+    monkeypatch.setattr(chat, "reply", fake_reply)
+    monkeypatch.setattr(plugin_config, "deepseek_tools_enabled", False)
+
+    async def send(message: str) -> None:
+        pass
+
+    await chat.process_private_poke(make_poke(), send)
+
+    assert captured["text"] == chat.POKE_PROMPT
 
 
 async def test_poke_tool_calls_friend_poke(
