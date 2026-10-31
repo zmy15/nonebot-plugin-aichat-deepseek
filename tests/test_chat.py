@@ -592,7 +592,7 @@ async def test_reply_with_image_uploads_and_sends(
             self.messages: list[dict] | None = None
 
         async def upload_image(
-            self, data: bytes, filename: str, content_type: str
+            self, data: bytes, filename: str, content_type: str, **kwargs
         ) -> str:
             self.uploaded.append((data, filename, content_type))
             return "file-api-test"

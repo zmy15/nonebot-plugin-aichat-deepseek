@@ -307,6 +307,8 @@ async def compress_if_needed(session_key: str) -> None:
             on_usage=lambda usage: _log_api_usage(
                 session_key, "compression", usage
             ),
+            session_key=session_key,
+            phase="compression",
         )
     except DeepSeekError as exc:
         logger.warning(
@@ -368,6 +370,7 @@ async def _generate_reply_locked(
                     payload.data,
                     payload.filename,
                     payload.content_type,
+                    session_key=session_key,
                 )
             )
 
@@ -400,9 +403,16 @@ async def _generate_reply_locked(
             tool_runner=run_tool,
             max_tool_rounds=plugin_config.deepseek_tool_max_rounds,
             on_usage=record_usage,
+            session_key=session_key,
+            phase="reply",
         )
     else:
-        answer = await client.chat(messages, on_usage=record_usage)
+        answer = await client.chat(
+            messages,
+            on_usage=record_usage,
+            session_key=session_key,
+            phase="reply",
+        )
 
     store.add_turn(session_key, history_text, answer)
     return answer
@@ -546,6 +556,8 @@ async def _is_message_complete(
             on_usage=lambda usage: _log_api_usage(
                 session_key, "completeness", usage
             ),
+            session_key=session_key,
+            phase="completeness",
         )
     except Exception:
         logger.exception("消息完整性判断失败，按完整处理")

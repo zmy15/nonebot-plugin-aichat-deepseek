@@ -142,13 +142,17 @@ DEEPSEEK_REPLY_INTERVAL=1.0
 
 ## 日志
 
-每次用户消息、API 调用和最终回复都会记录日志，方便排查“有没有回复”和缓存命中情况。
+每次用户消息、API 调用、工具调用和最终回复都会记录日志，方便排查“有没有回复”、缓存命中以及工具执行情况。
 
 示例：
 
 ```text
 [chat] incoming session=12345:67890 text_len=8 images=0 aggregate=True
 [chat] aggregated session=12345:67890 text_len=8 images=0
+[deepseek-api] start session=12345:67890 phase=reply model=deepseek-flash messages=12 tools=4
+[deepseek-api] ok session=12345:67890 phase=reply status=200 duration_ms=1832 cache_hit=512 cache_miss=128 prompt_tokens=640 completion_tokens=96
+[tool] start session=12345:67890 name=query_chat_history args_len=27
+[tool] done session=12345:67890 name=query_chat_history status=ok duration_ms=3 result_chars=184
 [deepseek] session=12345:67890 phase=reply cache_hit=512 cache_miss=128 prompt_tokens=640 completion_tokens=96
 [chat] reply qid=a1b2c3d4 session=12345:67890 replied=true reason=ok segments=2 api_calls=1 cache_hit=512 cache_miss=128 prompt_tokens=640 completion_tokens=96
 ```
@@ -156,12 +160,14 @@ DEEPSEEK_REPLY_INTERVAL=1.0
 - `incoming`：收到一条用户消息，记录文本长度和图片数量；
 - `question`：一次完整提问开始处理，带 `qid`；
 - `aggregated`：连续消息聚合完成后进入处理；
-- `deepseek`：每次 API 调用的缓存命中、未命中、输入/输出 token；
+- `deepseek-api start/ok/error`：每次 Chat Completions / Files API 请求的模型、消息数、工具数、状态码、耗时和缓存命中；
+- `tool start/done/error`：每次工具调用的名称、参数长度、执行耗时、结果长度和状态；
+- `deepseek`：兼容原有的按阶段 token 统计；
 - `reply`：最终是否回复、原因、分条数量、累计 token；
 - 判断为不完整时记录 `[chat] no_reply ... reason=incomplete`；
 - 未配置 Key、图片错误、API 错误、发送失败等会记录 `replied=false` 及原因。
 
-日志只记录文本长度，不记录用户完整原文。缓存命中取自 DeepSeek 返回的 `prompt_cache_hit_tokens` / `prompt_cache_miss_tokens`（兼容 `prompt_tokens_details.cached_tokens`）。
+日志只记录文本长度、图片数量和参数长度，不记录用户完整原文、图片内容或工具参数具体内容。缓存命中取自 DeepSeek 返回的 `prompt_cache_hit_tokens` / `prompt_cache_miss_tokens`（兼容 `prompt_tokens_details.cached_tokens`）。
 
 关于 `cache_hit=0`：
 

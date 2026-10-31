@@ -13,8 +13,11 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from datetime import datetime
 from typing import Any
+
+from nonebot import logger
 
 from .formatting import strip_markdown
 from .history import UTC8, ConversationStore
@@ -367,6 +370,17 @@ async def execute_tool(
     store: ConversationStore,
 ) -> str:
     """执行模型请求的工具，返回给模型的字符串结果。"""
+    started = time.perf_counter()
+    args_size = (
+        len(arguments)
+        if isinstance(arguments, str)
+        else len(json.dumps(arguments, ensure_ascii=False))
+    )
+    logger.info(
+        f"[tool] start session={session_key} name={name} "
+        f"args_len={args_size}"
+    )
+
     handlers = {
         TOOL_QUERY_HISTORY: _execute_query_history,
         TOOL_SAVE_MEMORY: _execute_save_memory,
@@ -375,11 +389,48 @@ async def execute_tool(
     }
     handler = handlers.get(name)
     if handler is None:
+        logger.warning(
+            f"[tool] error session={session_key} name={name} "
+            f"reason=unknown_tool duration_ms={_elapsed_ms(started)}"
+        )
         return _error(f"未知工具：{name}")
 
     try:
         args = _parse_arguments(arguments)
     except ValueError as exc:
+        logger.warning(
+            f"[tool] error session={session_key} name={name} "
+            f"reason=invalid_arguments duration_ms={_elapsed_ms(started)} "
+            f"message={exc}"
+        )
         return _error(str(exc))
 
-    return handler(args, session_key, store)
+    try:
+        result = handler(args, session_key, store)
+    except Exception:
+        logger.exception(
+            f"[tool] error session={session_key} name={name} "
+            f"reason=exception duration_ms={_elapsed_ms(started)}"
+        )
+        raise
+
+    status = "ok"
+    error = ""
+    try:
+        payload = json.loads(result)
+    except (TypeError, ValueError):
+        payload = None
+    if isinstance(payload, dict) and "error" in payload:
+        status = "error"
+        error = str(payload["error"])[:200]
+
+    logger.info(
+        f"[tool] done session={session_key} name={name} status={status} "
+        f"duration_ms={_elapsed_ms(started)} result_chars={len(result)}"
+        + (f" error={error}" if error else "")
+    )
+    return result
+
+
+def _elapsed_ms(started: float) -> int:
+    return round((time.perf_counter() - started) * 1000)
