@@ -34,3 +34,10 @@ def store_cls():
 
     return ConversationStore
 
+
+@pytest.fixture
+def tools_mod():
+    import nonebot_plugin_aichat_deepseek.tools as module
+
+    return module
+

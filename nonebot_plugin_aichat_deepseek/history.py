@@ -9,10 +9,14 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 from .data_source import ChatMessage
+
+UTC = timezone.utc
+UTC8 = timezone(timedelta(hours=8), name="UTC+8")
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS messages (
@@ -33,6 +37,19 @@ CREATE TABLE IF NOT EXISTS summaries (
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 """
+
+
+def _utc_text(timestamp: int) -> str:
+    return datetime.fromtimestamp(timestamp, tz=UTC).strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
+
+
+def _utc_to_utc8(value: str) -> str:
+    moment = datetime.strptime(value, "%Y-%m-%d %H:%M:%S")
+    return moment.replace(tzinfo=UTC).astimezone(UTC8).strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
 
 
 class ConversationStore:
@@ -107,15 +124,28 @@ class ConversationStore:
             cast(ChatMessage, dict(message)) for message in messages
         ]
 
-    def add_turn(self, key: str, user_text: str, assistant_text: str) -> None:
+    def add_turn(
+        self,
+        key: str,
+        user_text: str,
+        assistant_text: str,
+        *,
+        when: datetime | None = None,
+    ) -> None:
         """持久化一轮完整问答，并同步到内存。"""
+        moment = when or datetime.now(UTC)
+        if moment.tzinfo is None:
+            moment = moment.replace(tzinfo=UTC8)
+        created_at = moment.astimezone(UTC).strftime("%Y-%m-%d %H:%M:%S")
+
         with self._conn:
             self._conn.executemany(
-                "INSERT INTO messages (session_key, role, content) "
-                "VALUES (?, ?, ?)",
+                "INSERT INTO messages "
+                "(session_key, role, content, created_at) "
+                "VALUES (?, ?, ?, ?)",
                 [
-                    (key, "user", user_text),
-                    (key, "assistant", assistant_text),
+                    (key, "user", user_text, created_at),
+                    (key, "assistant", assistant_text, created_at),
                 ],
             )
         self._messages.setdefault(key, []).extend(
@@ -173,6 +203,64 @@ class ConversationStore:
 
         self._messages[key] = messages[count:]
         self._summaries[key] = summary
+
+    def query_history(
+        self,
+        key: str,
+        *,
+        start_ts: int | None = None,
+        end_ts: int | None = None,
+        keyword: str | None = None,
+        limit: int = 10,
+    ) -> list[dict[str, Any]]:
+        """把 messages 中的 user/assistant 配对成轮次后查询。"""
+        clauses = ["u.session_key = ?", "u.role = 'user'"]
+        params: list[Any] = [key]
+
+        if start_ts is not None:
+            clauses.append("u.created_at >= ?")
+            params.append(_utc_text(start_ts))
+        if end_ts is not None:
+            clauses.append("u.created_at <= ?")
+            params.append(_utc_text(end_ts))
+        if keyword:
+            escaped = (
+                keyword.replace("\\", "\\\\")
+                .replace("%", "\\%")
+                .replace("_", "\\_")
+            )
+            clauses.append(
+                "(u.content LIKE ? ESCAPE '\\' "
+                "OR a.content LIKE ? ESCAPE '\\')"
+            )
+            params.extend([f"%{escaped}%", f"%{escaped}%"])
+
+        limit = max(1, min(int(limit), 50))
+        params.append(limit)
+
+        rows = self._conn.execute(
+            "SELECT u.created_at, u.content, a.content "
+            "FROM messages AS u "
+            "JOIN messages AS a ON a.id = ("
+            "    SELECT MIN(a2.id) FROM messages AS a2 "
+            "    WHERE a2.session_key = u.session_key "
+            "      AND a2.role = 'assistant' "
+            "      AND a2.id > u.id"
+            ") "
+            f"WHERE {' AND '.join(clauses)} "
+            "ORDER BY u.id DESC LIMIT ?",
+            params,
+        ).fetchall()
+        rows.reverse()
+
+        return [
+            {
+                "time": _utc_to_utc8(created_at),
+                "user": user_content,
+                "assistant": assistant_content,
+            }
+            for created_at, user_content, assistant_content in rows
+        ]
 
     def clear(self, key: str) -> None:
         with self._conn:

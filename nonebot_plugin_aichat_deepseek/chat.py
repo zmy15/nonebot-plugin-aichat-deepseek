@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import random
 from collections.abc import Awaitable, Callable
+from datetime import datetime
 
 from nonebot import get_driver, logger, on_message
 from nonebot.adapters import Event
@@ -18,7 +19,8 @@ from nonebot.rule import Rule
 from .config import plugin_config
 from .data_source import ChatMessage, DeepSeekClient, DeepSeekError
 from .formatting import split_reply, strip_markdown
-from .history import ConversationStore
+from .history import UTC8, ConversationStore
+from .tools import TOOL_DEFINITIONS, execute_tool
 
 Sender = Callable[[str], Awaitable[None]]
 
@@ -103,6 +105,14 @@ def _build_system_prompt(summary: str = "") -> str:
         "每条消息简短自然，像真人聊天。\n"
         "3. 不要在回复中解释或提到分隔符。"
     )
+    if plugin_config.deepseek_tools_enabled:
+        now = datetime.now(UTC8).strftime("%Y-%m-%d %H:%M")
+        rules += (
+            f"\n4. 当前时间是 {now}（UTC+8）。"
+            "用户询问以前聊过什么、回忆之前的内容时，"
+            "调用 query_chat_history 工具查询；"
+            "提到“昨天”等相对时间时先换算成日期，不要编造。"
+        )
     prompt = f"{persona}\n\n{rules}" if persona else rules
     if summary:
         prompt = f"{prompt}\n\n【历史对话摘要】\n{summary}"
@@ -178,7 +188,21 @@ async def compress_if_needed(session_key: str) -> None:
 
 async def _generate_reply_locked(session_key: str, text: str) -> str:
     messages = _build_request_messages(session_key, text)
-    answer = await client.chat(messages)
+
+    if plugin_config.deepseek_tools_enabled:
+
+        async def run_tool(name: str, arguments: str) -> str:
+            return await execute_tool(name, arguments, session_key, store)
+
+        answer = await client.chat_with_tools(
+            messages,
+            tools=TOOL_DEFINITIONS,
+            tool_runner=run_tool,
+            max_tool_rounds=plugin_config.deepseek_tool_max_rounds,
+        )
+    else:
+        answer = await client.chat(messages)
+
     store.add_turn(session_key, text, answer)
     return answer
 

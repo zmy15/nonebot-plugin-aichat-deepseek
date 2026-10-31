@@ -8,11 +8,14 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import json
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import Any, Literal, TypedDict
 
 import httpx
 from nonebot import logger
+
+ToolRunner = Callable[[str, str], Awaitable[str]]
 
 
 class ChatMessage(TypedDict):
@@ -33,7 +36,7 @@ class DeepSeekError(RuntimeError):
 
 
 class DeepSeekClient:
-    """一个最小的 DeepSeek 对话客户端，只实现非流式对话。"""
+    """一个最小的 DeepSeek 对话客户端，支持非流式对话与工具调用。"""
 
     def __init__(
         self,
@@ -61,10 +64,14 @@ class DeepSeekClient:
         """是否配置了 API Key。"""
         return bool(self._api_key)
 
-    def _build_payload(self, messages: Sequence[ChatMessage]) -> dict[str, Any]:
+    def _build_payload(
+        self,
+        messages: Sequence[Mapping[str, Any]],
+        tools: Sequence[Mapping[str, Any]] | None = None,
+    ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "model": self._model,
-            "messages": list(messages),
+            "messages": [dict(message) for message in messages],
             "stream": False,
             "temperature": self._temperature,
         }
@@ -74,6 +81,8 @@ class DeepSeekClient:
             payload["thinking"] = {
                 "type": "enabled" if self._thinking else "disabled"
             }
+        if tools:
+            payload["tools"] = list(tools)
         return payload
 
     @staticmethod
@@ -101,7 +110,7 @@ class DeepSeekClient:
         return f"HTTP {response.status_code}"
 
     @staticmethod
-    def _extract_content(data: Any) -> str:
+    def _extract_message(data: Any) -> dict[str, Any]:
         if not isinstance(data, dict):
             raise DeepSeekError("DeepSeek 返回了无法解析的响应")
 
@@ -111,14 +120,27 @@ class DeepSeekClient:
 
         first = choices[0]
         message = first.get("message") if isinstance(first, dict) else None
-        content = message.get("content") if isinstance(message, dict) else None
+        if not isinstance(message, dict):
+            raise DeepSeekError("DeepSeek 返回了无法解析的回复")
+        return message
+
+    @classmethod
+    def _content_from_message(cls, message: Mapping[str, Any]) -> str:
+        content = message.get("content")
         if not isinstance(content, str) or not content.strip():
             raise DeepSeekError("DeepSeek 返回了空回复")
-
         return content.strip()
 
-    async def chat(self, messages: Sequence[ChatMessage]) -> str:
-        """发送对话消息并返回模型回复文本。"""
+    @classmethod
+    def _extract_content(cls, data: Any) -> str:
+        return cls._content_from_message(cls._extract_message(data))
+
+    async def _request(
+        self,
+        messages: Sequence[Mapping[str, Any]],
+        *,
+        tools: Sequence[Mapping[str, Any]] | None = None,
+    ) -> dict[str, Any]:
         if not self._api_key:
             raise DeepSeekError("未配置 DEEPSEEK_API_KEY")
 
@@ -127,7 +149,7 @@ class DeepSeekClient:
             "Authorization": f"Bearer {self._api_key}",
             "Content-Type": "application/json",
         }
-        payload = self._build_payload(messages)
+        payload = self._build_payload(messages, tools)
 
         try:
             async with httpx.AsyncClient(
@@ -148,10 +170,87 @@ class DeepSeekClient:
                 self._error_detail(response, data),
                 status_code=response.status_code,
             )
+        if not isinstance(data, dict):
+            raise DeepSeekError("DeepSeek 返回了无法解析的响应")
 
-        content = self._extract_content(data)
-        if isinstance(data, dict):
-            usage = data.get("usage")
-            if usage:
-                logger.debug(f"DeepSeek token 用量：{usage}")
-        return content
+        usage = data.get("usage")
+        if usage:
+            logger.debug(f"DeepSeek token 用量：{usage}")
+        return data
+
+    async def chat(self, messages: Sequence[ChatMessage]) -> str:
+        """发送对话消息并返回模型回复文本。"""
+        data = await self._request(messages)
+        return self._extract_content(data)
+
+    async def chat_with_tools(
+        self,
+        messages: Sequence[ChatMessage],
+        *,
+        tools: Sequence[Mapping[str, Any]],
+        tool_runner: ToolRunner,
+        max_tool_rounds: int = 3,
+    ) -> str:
+        """自动执行模型请求的工具，直到模型给出最终文本回复。"""
+        working: list[dict[str, Any]] = [dict(message) for message in messages]
+        rounds = max(1, max_tool_rounds)
+
+        for _ in range(rounds):
+            data = await self._request(working, tools=tools)
+            message = self._extract_message(data)
+            tool_calls = message.get("tool_calls")
+            if not tool_calls:
+                return self._content_from_message(message)
+            if not isinstance(tool_calls, list):
+                raise DeepSeekError("DeepSeek 返回了无法解析的工具调用")
+
+            working.append(
+                {
+                    "role": "assistant",
+                    "content": message.get("content"),
+                    "tool_calls": tool_calls,
+                }
+            )
+
+            for call in tool_calls:
+                if not isinstance(call, dict):
+                    raise DeepSeekError("DeepSeek 返回了无法解析的工具调用")
+                function = call.get("function")
+                if not isinstance(function, dict):
+                    raise DeepSeekError("DeepSeek 返回了无法解析的工具调用")
+
+                name = function.get("name")
+                arguments = function.get("arguments") or "{}"
+                if not isinstance(name, str) or not name:
+                    raise DeepSeekError("DeepSeek 返回了无效的工具名称")
+                if not isinstance(arguments, str):
+                    arguments = json.dumps(arguments, ensure_ascii=False)
+
+                try:
+                    result = await tool_runner(name, arguments)
+                except Exception:
+                    logger.exception(f"工具 {name} 执行失败")
+                    result = json.dumps(
+                        {"error": f"工具 {name} 执行失败"},
+                        ensure_ascii=False,
+                    )
+
+                tool_call_id = call.get("id")
+                if not isinstance(tool_call_id, str) or not tool_call_id:
+                    tool_call_id = f"call_{len(working)}"
+
+                working.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tool_call_id,
+                        "content": (
+                            result
+                            if isinstance(result, str)
+                            else json.dumps(result, ensure_ascii=False)
+                        ),
+                    }
+                )
+
+        # 工具调用次数达到上限后，强制模型给出普通文本回复
+        data = await self._request(working)
+        return self._extract_content(data)

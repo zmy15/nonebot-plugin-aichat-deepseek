@@ -155,3 +155,16 @@ def test_build_messages_returns_a_copy(store_cls) -> None:
 
     assert store.build_messages("1:2")[0]["content"] == "q"
     store.close()
+
+
+def test_query_history_includes_compressed_messages(store_cls) -> None:
+    store = store_cls(max_turns=30)
+    store.add_turn("1:2", "旧问题", "旧回答")
+    store.apply_compression("1:2", 2, "旧摘要")
+
+    assert store.build_messages("1:2") == []
+    rows = store.query_history("1:2")
+    assert len(rows) == 1
+    assert rows[0]["user"] == "旧问题"
+    assert rows[0]["assistant"] == "旧回答"
+    store.close()

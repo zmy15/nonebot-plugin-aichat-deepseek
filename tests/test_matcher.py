@@ -15,6 +15,9 @@ class FakeClient:
         self.requests.append(list(messages))
         return self.replies.pop(0)
 
+    async def chat_with_tools(self, messages, **kwargs: Any) -> str:
+        return await self.chat(messages)
+
 
 def make_private_event(text: str, *, self_id: int = 1, user_id: int = 2):
     from nonebot.adapters.onebot.v11 import Message

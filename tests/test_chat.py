@@ -17,6 +17,9 @@ class FakeClient:
             raise self.error
         return self.replies.pop(0)
 
+    async def chat_with_tools(self, messages, **kwargs: Any) -> str:
+        return await self.chat(messages)
+
 
 def make_private_event(text: str, *, self_id: int = 1, user_id: int = 2):
     from nonebot.adapters.onebot.v11 import Message
@@ -253,6 +256,8 @@ def test_system_prompt_contains_output_rules() -> None:
     assert plugin_config.deepseek_split_delimiter in prompt
     assert "纯文本" in prompt
     assert "Markdown" in prompt
+    assert "query_chat_history" in prompt
+    assert "UTC+8" in prompt
 
 
 def test_format_error() -> None:
@@ -294,3 +299,60 @@ async def test_process_private_message_ignores_noise(
 
     await chat_module.process_private_message(make_private_event("你好"), send)
     assert sent == ["收到"]
+
+
+async def test_reply_archives_turn(monkeypatch: pytest.MonkeyPatch) -> None:
+    from nonebot_plugin_aichat_deepseek import chat as chat_module
+
+    fake = FakeClient("归档回复")
+    monkeypatch.setattr(chat_module, "client", fake)
+    chat_module.store.clear("9:9")
+
+    sent: list[str] = []
+
+    async def send(message: str) -> None:
+        sent.append(message)
+
+    await chat_module.reply("9:9", "历史问题", send)
+
+    rows = chat_module.store.query_history("9:9")
+    assert len(rows) == 1
+    assert rows[0]["user"] == "历史问题"
+    assert rows[0]["assistant"] == "归档回复"
+    assert sent == ["归档回复"]
+
+
+async def test_reply_tool_can_query_history(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from nonebot_plugin_aichat_deepseek import chat as chat_module
+
+    class ToolCallingClient:
+        configured = True
+
+        def __init__(self) -> None:
+            self.tool_result = ""
+
+        async def chat_with_tools(
+            self, messages, *, tools, tool_runner, max_tool_rounds
+        ) -> str:
+            self.tool_result = await tool_runner(
+                "query_chat_history", '{"keyword":"旧"}'
+            )
+            return "我记得一些"
+
+    fake = ToolCallingClient()
+    monkeypatch.setattr(chat_module, "client", fake)
+    chat_module.store.clear("7:7")
+    chat_module.store.add_turn("7:7", "旧问题", "旧回答")
+
+    sent: list[str] = []
+
+    async def send(message: str) -> None:
+        sent.append(message)
+
+    await chat_module.reply("7:7", "我们以前聊了什么", send)
+
+    assert "旧问题" in fake.tool_result
+    assert "旧回答" in fake.tool_result
+    assert sent == ["我记得一些"]

@@ -179,3 +179,192 @@ async def test_network_error_is_wrapped(ds) -> None:
     client = make_client(ds.DeepSeekClient, handler)
     with pytest.raises(ds.DeepSeekError, match="请求 DeepSeek API 失败"):
         await client.chat(MESSAGES)
+
+
+async def test_chat_with_tools_executes_tool(ds) -> None:
+    requests: list[dict] = []
+    responses = [
+        httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": None,
+                            "tool_calls": [
+                                {
+                                    "id": "call_1",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "query_chat_history",
+                                        "arguments": '{"keyword":"猫"}',
+                                    },
+                                }
+                            ],
+                        }
+                    }
+                ]
+            },
+        ),
+        httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {"message": {"role": "assistant", "content": "最终回复"}}
+                ]
+            },
+        ),
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        return responses.pop(0)
+
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "query_chat_history",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+    ]
+    calls: list[tuple[str, str]] = []
+
+    async def runner(name: str, arguments: str) -> str:
+        calls.append((name, arguments))
+        return '{"turns": []}'
+
+    client = make_client(ds.DeepSeekClient, handler)
+    content = await client.chat_with_tools(
+        MESSAGES,
+        tools=tools,
+        tool_runner=runner,
+        max_tool_rounds=3,
+    )
+
+    assert content == "最终回复"
+    assert calls == [("query_chat_history", '{"keyword":"猫"}')]
+    assert requests[0]["tools"] == tools
+
+    second_messages = requests[1]["messages"]
+    assert second_messages[-2]["role"] == "assistant"
+    assert second_messages[-2]["tool_calls"][0]["id"] == "call_1"
+    assert second_messages[-1] == {
+        "role": "tool",
+        "tool_call_id": "call_1",
+        "content": '{"turns": []}',
+    }
+
+
+async def test_chat_with_tools_stops_after_max_rounds(ds) -> None:
+    request_count = 0
+    requests: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal request_count
+        request_count += 1
+        requests.append(json.loads(request.content))
+        if request_count <= 2:
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "content": None,
+                                "tool_calls": [
+                                    {
+                                        "id": f"call_{request_count}",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "query_chat_history",
+                                            "arguments": "{}",
+                                        },
+                                    }
+                                ],
+                            }
+                        }
+                    ]
+                },
+            )
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {"message": {"role": "assistant", "content": "最终回复"}}
+                ]
+            },
+        )
+
+    async def runner(name: str, arguments: str) -> str:
+        return "ok"
+
+    client = make_client(ds.DeepSeekClient, handler)
+    content = await client.chat_with_tools(
+        MESSAGES,
+        tools=[{"type": "function", "function": {"name": "t"}}],
+        tool_runner=runner,
+        max_tool_rounds=2,
+    )
+
+    assert content == "最终回复"
+    assert request_count == 3
+    assert "tools" not in requests[-1]
+
+
+async def test_tool_runner_error_is_reported_to_model(ds) -> None:
+    requests: list[dict] = []
+    responses = [
+        httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": None,
+                            "tool_calls": [
+                                {
+                                    "id": "call_1",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "query_chat_history",
+                                        "arguments": "{}",
+                                    },
+                                }
+                            ],
+                        }
+                    }
+                ]
+            },
+        ),
+        httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {"message": {"role": "assistant", "content": "好的"}}
+                ]
+            },
+        ),
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        return responses.pop(0)
+
+    async def runner(name: str, arguments: str) -> str:
+        raise RuntimeError("database down")
+
+    client = make_client(ds.DeepSeekClient, handler)
+    await client.chat_with_tools(
+        MESSAGES,
+        tools=[{"type": "function", "function": {"name": "t"}}],
+        tool_runner=runner,
+    )
+
+    tool_message = requests[1]["messages"][-1]
+    assert tool_message["role"] == "tool"
+    assert "执行失败" in tool_message["content"]

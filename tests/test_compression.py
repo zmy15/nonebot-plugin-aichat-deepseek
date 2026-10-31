@@ -12,6 +12,9 @@ class FakeClient:
             raise self.error
         return self.replies.pop(0)
 
+    async def chat_with_tools(self, messages, **kwargs) -> str:
+        return await self.chat(messages)
+
 
 async def test_compress_if_needed_uses_summary_model(
     monkeypatch, store_cls

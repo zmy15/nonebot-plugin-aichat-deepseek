@@ -8,7 +8,8 @@
 
 - 仅响应 OneBot V11 私聊消息，无需 `/` 等前缀
 - 多轮上下文（默认加载最近 30 轮，按用户隔离）
-- 对话数据持久化到本地 SQLite，启动时自动加载历史
+- 当前上下文持久化到 SQLite，启动时自动加载历史
+- 历史聊天记录复用同一数据库，模型可调用 `query_chat_history` 查询过去聊过什么
 - 未压缩消息超过 30 轮时，自动把最早 20 条消息压缩成摘要，放到 system 指令之后
 - 自动移除 Markdown 标记，只发送纯文本
 - 模型用 `|||` 分隔多条消息，插件按随机间隔逐条发送，更像真人聊天
@@ -38,6 +39,8 @@ pip install nonebot-plugin-aichat-deepseek
 DEEPSEEK_API_KEY=sk-xxxxxxxx
 DEEPSEEK_MODEL=deepseek-flash
 DEEPSEEK_DB_PATH=data/nonebot_plugin_aichat_deepseek/chat.db
+DEEPSEEK_TOOLS_ENABLED=true
+DEEPSEEK_TOOL_MAX_ROUNDS=3
 DEEPSEEK_HISTORY_TURNS=30
 DEEPSEEK_COMPRESSION_TRIGGER_TURNS=30
 DEEPSEEK_COMPRESSION_BATCH_MESSAGES=20
@@ -51,6 +54,8 @@ DEEPSEEK_REPLY_INTERVAL=1.0
 | `DEEPSEEK_API_BASE` | `str` | `https://api.deepseek.com` | API 地址，可替换为兼容代理 |
 | `DEEPSEEK_MODEL` | `str` | `deepseek-flash` | 模型名，可选 `deepseek-flash`、`deepseek-v4-pro` |
 | `DEEPSEEK_DB_PATH` | `str` | `data/nonebot_plugin_aichat_deepseek/chat.db` | SQLite 数据库路径，相对路径基于机器人启动目录 |
+| `DEEPSEEK_TOOLS_ENABLED` | `bool` | `True` | 是否允许模型调用查询历史工具 |
+| `DEEPSEEK_TOOL_MAX_ROUNDS` | `int` | `3` | 单次回复最多允许几轮工具调用 |
 | `DEEPSEEK_TIMEOUT` | `float` | `60.0` | 单次请求超时（秒） |
 | `DEEPSEEK_SYSTEM_PROMPT` | `str` | 内置中文助手提示词 | 人设提示词；插件会自动追加纯文本与分隔符输出要求 |
 | `DEEPSEEK_TEMPERATURE` | `float` | `1.0` | 采样温度，范围 0–2 |
@@ -86,11 +91,46 @@ DEEPSEEK_REPLY_INTERVAL=1.0
 
 ## 数据存储与上下文压缩
 
-- 数据库默认位于 `data/nonebot_plugin_aichat_deepseek/chat.db`，启动时自动创建表并加载未压缩的历史消息和摘要。
+- 当前上下文数据库默认位于 `data/nonebot_plugin_aichat_deepseek/chat.db`，启动时自动创建表并加载未压缩的历史消息和摘要。
 - 每完成一轮问答，用户消息和 AI 原始回复会立即写入 `messages` 表。
 - 未压缩消息超过 `DEEPSEEK_COMPRESSION_TRIGGER_TURNS` 轮（默认 30 轮）时，插件会把最早 `DEEPSEEK_COMPRESSION_BATCH_MESSAGES` 条（默认 20 条）交给模型压缩成摘要，保存到 `summaries` 表，并在后续请求中放到 system 指令之后。
 - 被压缩的消息不会删除，只是标记为 `compressed = 1`，便于保留原始记录；可用 `sqlite3` 直接查看。
+- `query_chat_history` 工具直接查询同一个 `messages` 表，因此可以检索到包括已压缩消息在内的完整历史。
+- `messages.created_at` 以 UTC 保存；工具输入和返回的时间统一按 UTC+8 解释和展示。
 - 数据库为明文存储，请自行做好备份和访问权限控制。
+
+## 工具调用
+
+启用 `DEEPSEEK_TOOLS_ENABLED` 后，模型会获得一个工具：
+
+| 工具 | 说明 |
+| --- | --- |
+| `query_chat_history` | 查询当前私聊用户过去的聊天记录 |
+
+参数（时间均按 UTC+8）：
+
+| 参数 | 类型 | 说明 |
+| --- | --- | --- |
+| `keyword` | `string` | 可选，按关键词搜索用户或 AI 的消息内容 |
+| `start_time` | `string` | 可选，开始时间，`YYYY-MM-DD` 或 `YYYY-MM-DD HH:MM:SS` |
+| `end_time` | `string` | 可选，结束时间；只写日期时包含当天 23:59:59 |
+| `limit` | `integer` | 可选，返回 1–20 条，默认 10 |
+
+关键词和时间范围可以单独使用，也可以组合查询。例如：
+
+- 只看关键词：`keyword="猫"`
+- 只看时间：`start_time="2026-10-01", end_time="2026-10-07"`
+- 组合：`keyword="猫", start_time="2026-10-01", end_time="2026-10-07"`
+
+系统提示中会附带当前 UTC+8 时间，模型遇到“昨天”“上周”等相对时间时会先换算成具体日期再查询。
+
+- 只能查询当前 `session_key` 对应的用户，不能跨用户查询。
+- 工具结果会裁剪过长的消息内容，避免占用过多上下文。
+- 单次回复最多进行 `DEEPSEEK_TOOL_MAX_ROUNDS` 轮工具调用，超过后强制模型输出最终回复。
+- 是否调用工具由模型根据用户问题自行决定。
+- 工具调用格式参考 [DeepSeek Tool Calls 文档](https://api-docs.deepseek.com/zh-cn/guides/tool_calls)。
+
+## 命令
 
 | 命令 | 说明 |
 | --- | --- |
@@ -111,6 +151,7 @@ pytest
 
 - [NoneBot2 插件编写文档](https://nonebot.dev/docs/tutorial/create-plugin)
 - [DeepSeek Chat Completions API](https://api-docs.deepseek.com/zh-cn/api/create-chat-completion)
+- [DeepSeek Tool Calls](https://api-docs.deepseek.com/zh-cn/guides/tool_calls)
 
 ## 许可协议
 

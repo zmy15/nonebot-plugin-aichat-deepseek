@@ -26,6 +26,10 @@ class Config(BaseModel):
     # 数据存储（SQLite）。相对路径基于机器人启动目录
     deepseek_db_path: str = "data/nonebot_plugin_aichat_deepseek/chat.db"
 
+    # 工具调用
+    deepseek_tools_enabled: bool = True
+    deepseek_tool_max_rounds: int = Field(default=3, ge=1)
+
     # 生成参数
     deepseek_system_prompt: str = (
         "你是一个乐于助人的 AI 助手，请使用简体中文回答用户的问题。"
