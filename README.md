@@ -17,6 +17,8 @@
 - 连续消息聚合：用户分多次发送的一句话会合并；AI 判断不完整时先不回复，等提问完整
 - 回复抖动：首条回复前有随机停顿，多条回复之间也有随机间隔
 - 支持私聊图片理解：图片经 Files API 上传后以 `file_id` 交给 `deepseek-flash` 分析
+- 表情包收藏：自动把私聊收到的表情包存入本地表情库，记录含义和标签
+- 模型可调用工具按含义查询表情包，并通过 OneBot 图片消息发送
 - 未压缩消息超过 30 轮时，自动把最早 20 条消息压缩成摘要，放到 system 指令之后
 - 自动移除 Markdown 标记，只发送纯文本
 - 模型用 `|||` 分隔多条消息，插件按随机间隔逐条发送，更像真人聊天
@@ -58,6 +60,10 @@ DEEPSEEK_CUSTOM_PROMPT_MAX_CHARS=2000
 DEEPSEEK_IMAGE_ENABLED=true
 DEEPSEEK_IMAGE_MAX_COUNT=4
 DEEPSEEK_IMAGE_EXPIRE_SECONDS=86400
+DEEPSEEK_STICKER_ENABLED=true
+DEEPSEEK_STICKER_DIR=data/nonebot_plugin_aichat_deepseek/stickers
+DEEPSEEK_STICKER_MAX_COUNT=4
+DEEPSEEK_STICKER_SEARCH_LIMIT=10
 DEEPSEEK_AGGREGATE_MESSAGES=true
 DEEPSEEK_DEBOUNCE_SECONDS=1.2
 DEEPSEEK_DEBOUNCE_JITTER=0.4
@@ -91,6 +97,10 @@ DEEPSEEK_REPLY_INTERVAL=1.0
 | `DEEPSEEK_IMAGE_MAX_COUNT` | `int` | `4` | 单条消息最多处理几张图片 |
 | `DEEPSEEK_IMAGE_TIMEOUT` | `float` | `60.0` | 下载图片超时（秒） |
 | `DEEPSEEK_IMAGE_EXPIRE_SECONDS` | `int` | `86400` | 上传文件有效期（秒），`0` 表示永久有效 |
+| `DEEPSEEK_STICKER_ENABLED` | `bool` | `True` | 是否自动收藏表情包并启用表情包工具 |
+| `DEEPSEEK_STICKER_DIR` | `str` | `data/nonebot_plugin_aichat_deepseek/stickers` | 表情包图片保存目录，相对路径基于机器人启动目录 |
+| `DEEPSEEK_STICKER_MAX_COUNT` | `int` | `4` | 单条消息最多自动收藏几个表情包 |
+| `DEEPSEEK_STICKER_SEARCH_LIMIT` | `int` | `10` | 查询表情包时默认返回条数，最大 20 |
 | `DEEPSEEK_AGGREGATE_MESSAGES` | `bool` | `True` | 是否把用户连续发送的多条消息聚合后再处理 |
 | `DEEPSEEK_DEBOUNCE_SECONDS` | `float` | `1.2` | 最后一条消息后等待多久再判断是否完整（秒） |
 | `DEEPSEEK_DEBOUNCE_JITTER` | `float` | `0.4` | 聚合等待时间的随机抖动范围（±秒） |
@@ -207,6 +217,30 @@ DEEPSEEK_REPLY_INTERVAL=1.0
 - 上传文件默认 24 小时后过期，可通过 `DEEPSEEK_IMAGE_EXPIRE_SECONDS=0` 改为永久有效；
 - 格式和限制参考 [图像理解](https://api-docs.deepseek.com/zh-cn/guides/vision)。
 
+## 表情包
+
+启用 `DEEPSEEK_STICKER_ENABLED` 后，私聊收到表情包时会自动收藏：
+
+1. 识别 OneBot `image` 消息段：`sub_type` 为 1（表情包）、3（斗图）、7（贴图），`summary` 含“表情”，或带有商城表情的 `emoji_id` / `emoji_package_id` / `key`；
+2. 如果客户端没有标记类型，用户明确说“记住/收藏/保存这个表情包”时也会收藏；
+3. 图片按 SHA-256 保存到 `DEEPSEEK_STICKER_DIR`，相同哈希只保留一份文件；
+4. 元数据写入 SQLite 的 `stickers` 表，按 `session_key` 隔离，记录含义、标签和使用次数。
+
+模型会在消息中看到本轮表情包的 ID，并可以：
+
+- 调用 `describe_sticker` 记录表情包的含义（例如“无语”“嘲笑”“开心”）；
+- 调用 `search_stickers` 按含义或标签查询；
+- 调用 `send_sticker` 发送表情包。
+
+发送通过 OneBot 11 的 `send_private_msg`，`image` 段的 `file` 优先使用本地文件 `file://` URI，失败时自动回退到 `base64://`，因此不要求 OneBot 实现和机器人在同一台机器上。
+
+注意：
+
+- 表情包按用户隔离，不会跨私聊用户共享；
+- 自动收藏依赖图片处理，`DEEPSEEK_IMAGE_ENABLED=false` 时不会收藏表情包；模型能看到图片时才能自动判断含义，也可以由用户直接说明含义；
+- 表情包文件不会因为 `/清空` 被删除；
+- 如果使用的 OneBot 实现没有上报 `sub_type` 等字段，可以对机器人说“记住这个表情包”强制收藏。
+
 ## 数据存储与上下文压缩
 
 - 当前上下文数据库默认位于 `data/nonebot_plugin_aichat_deepseek/chat.db`，启动时自动创建表并加载未压缩的历史消息和摘要。
@@ -218,6 +252,7 @@ DEEPSEEK_REPLY_INTERVAL=1.0
 - 发送 `/清空` 会删除当前用户的 `messages`、`summaries` 和 `memories` 记录，保留 `user_prompts` 中的自定义人设。
 - 长期记忆保存在同一数据库的 `memories` 表中，按 `session_key` 隔离。
 - 每个用户的自定义 system 提示词保存在同一数据库的 `user_prompts` 表中，同样按 `session_key` 隔离。
+- 表情包元数据保存在同一数据库的 `stickers` 表中，图片文件保存在 `DEEPSEEK_STICKER_DIR`；`/清空` 不会删除表情包。
 - 数据库为明文存储，请自行做好备份和访问权限控制。
 
 ## 长期记忆
@@ -262,7 +297,7 @@ DEEPSEEK_REPLY_INTERVAL=1.0
 
 ## 工具调用
 
-启用 `DEEPSEEK_TOOLS_ENABLED` 后，模型会获得以下工具（记忆相关工具还要求 `DEEPSEEK_MEMORY_ENABLED=true`，自定义提示词工具要求 `DEEPSEEK_CUSTOM_PROMPT_ENABLED=true`）：
+启用 `DEEPSEEK_TOOLS_ENABLED` 后，模型会获得以下工具（记忆相关工具还要求 `DEEPSEEK_MEMORY_ENABLED=true`，自定义提示词工具要求 `DEEPSEEK_CUSTOM_PROMPT_ENABLED=true`，表情包工具要求 `DEEPSEEK_STICKER_ENABLED=true`）：
 
 | 工具 | 说明 |
 | --- | --- |
@@ -274,6 +309,9 @@ DEEPSEEK_REPLY_INTERVAL=1.0
 | `get_user_system_prompt` | 查看当前用户的自定义提示词 |
 | `clear_user_system_prompt` | 清除当前用户的自定义提示词 |
 | `poke_user` | 戳一戳当前私聊用户 |
+| `describe_sticker` | 记录或更新表情包的含义 |
+| `search_stickers` | 按含义或标签查询表情包 |
+| `send_sticker` | 查询并发送一个表情包 |
 
 ### `query_chat_history`
 
@@ -340,6 +378,34 @@ DEEPSEEK_REPLY_INTERVAL=1.0
 
 无参数，戳一戳当前私聊用户。优先调用 `friend_poke`，失败时尝试 `send_poke`。
 
+### `describe_sticker`
+
+| 参数 | 类型 | 说明 |
+| --- | --- | --- |
+| `sticker_id` | `integer` | 必填，表情包 ID，来自本轮消息提示或 `search_stickers` 结果 |
+| `description` | `string` | 必填，简短含义，例如：无语、嘲笑、开心 |
+| `tags` | `string` | 可选，逗号分隔的标签，例如：无语,翻白眼 |
+
+用户发送表情包后，插件会在消息中给出表情包 ID。模型可以根据图片内容记录含义；如果用户说明了含义，会优先采用用户的说法。
+
+### `search_stickers`
+
+| 参数 | 类型 | 说明 |
+| --- | --- | --- |
+| `keyword` | `string` | 可选，按含义或标签搜索 |
+| `limit` | `integer` | 可选，返回 1–20 条，默认 `DEEPSEEK_STICKER_SEARCH_LIMIT` |
+
+只返回当前用户自己的表情包，不会跨用户查询。
+
+### `send_sticker`
+
+| 参数 | 类型 | 说明 |
+| --- | --- | --- |
+| `sticker_id` | `integer` | 可选，要发送的表情包 ID，优先级高于 `keyword` |
+| `keyword` | `string` | 可选，按含义或标签查找并发送最匹配的一个 |
+
+`sticker_id` 和 `keyword` 至少提供一个。发送使用 OneBot 11 的 `send_private_msg`，优先用 `file://` 本地路径，失败后自动回退到 `base64://`。
+
 ## 命令
 
 | 命令 | 说明 |
@@ -349,6 +415,15 @@ DEEPSEEK_REPLY_INTERVAL=1.0
 | `/清除`、`/重置`、`/清空上下文`、`/清除上下文`、`/重置上下文`、`/clear`、`/reset` | `/清空` 的兼容别名 |
 
 `/清空` 及其别名只作用于当前私聊用户，不会影响其他用户。清空后聊天从零开始，自定义人设仍然保留；如果也需要恢复默认人设，可另外让模型调用 `clear_user_system_prompt`。
+
+## 代码结构
+
+- `nonebot_plugin_aichat_deepseek/tools/<tool>.py`：每个工具独立模块，包含 `DEFINITION`、`execute()` 和 `TOOL`；
+- `tools/registry.py`：汇总工具、按开关过滤定义、统一分发执行；
+- `tools/base.py`：`Tool` 描述对象、`ToolContext` 和参数处理工具；
+- `tools/__init__.py`：保持 `execute_tool` / `build_tool_definitions` 等原有入口稳定。
+
+新增工具时，只需新增一个工具模块并加入 `registry.ALL_TOOLS`，不需要修改其他工具的实现。
 
 ## 开发与测试
 
@@ -368,6 +443,8 @@ pytest
 - [DeepSeek Tool Calls](https://api-docs.deepseek.com/zh-cn/guides/tool_calls)
 - [DeepSeek Files API](https://api-docs.deepseek.com/zh-cn/guides/files_api)
 - [DeepSeek 图像理解](https://api-docs.deepseek.com/zh-cn/guides/vision)
+- [OneBot 11 消息段格式](https://github.com/botuniverse/onebot-11/blob/master/message/segment.md)
+- [OneBot 11 API](https://github.com/botuniverse/onebot-11/blob/master/api/README.md)
 
 ## 许可协议
 

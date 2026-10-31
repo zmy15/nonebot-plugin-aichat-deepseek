@@ -24,6 +24,11 @@ from .data_source import ChatMessage, DeepSeekClient, DeepSeekError
 from .formatting import split_reply, strip_markdown
 from .history import UTC8, ConversationStore
 from .images import ImageError, fetch_image
+from .stickers import (
+    build_sticker_prompt_note,
+    is_sticker_image,
+    save_sticker_payload,
+)
 from .tools import (
     MEMORY_CATEGORY_LABELS,
     build_tool_definitions,
@@ -261,6 +266,20 @@ def _build_system_prompt(
             "不要频繁、无故戳用户。"
         )
 
+    if (
+        plugin_config.deepseek_tools_enabled
+        and plugin_config.deepseek_sticker_enabled
+    ):
+        rules += (
+            "\n用户发送表情包时，插件会把它存入表情库并在消息中给出"
+            "表情包 ID。如果你能根据图片判断它表达的情绪或含义，"
+            "调用 describe_sticker 记录一两个词的简短含义；"
+            "用户说明了含义时以用户说明为准。"
+            "用户想发表情包、或对话情绪合适时，"
+            "可以先调用 search_stickers 查看，再调用 send_sticker 发送；"
+            "不要连续频繁发送表情包。"
+        )
+
     prompt = f"{persona}\n\n{rules}" if persona else rules
     custom = user_prompt.strip()
     if plugin_config.deepseek_custom_prompt_enabled and custom:
@@ -410,6 +429,23 @@ async def _generate_reply_locked(
                 )
             )
 
+        sticker_records: list[dict[str, Any]] = []
+        if plugin_config.deepseek_sticker_enabled:
+            for segment, payload in zip(images, payloads):
+                if (
+                    len(sticker_records)
+                    >= plugin_config.deepseek_sticker_max_count
+                ):
+                    break
+                if not is_sticker_image(segment, text):
+                    continue
+                try:
+                    sticker_records.append(
+                        save_sticker_payload(store, session_key, payload)
+                    )
+                except Exception:
+                    logger.exception("保存表情包失败，跳过本次收藏")
+
         file_ids = []
         for payload in payloads:
             file_ids.append(
@@ -424,6 +460,14 @@ async def _generate_reply_locked(
         prompt = text or (
             "请描述这张图片。" if len(payloads) == 1 else "请描述这些图片。"
         )
+        sticker_note = (
+            build_sticker_prompt_note(sticker_records)
+            if plugin_config.deepseek_tools_enabled
+            else ""
+        )
+        if sticker_note:
+            prompt = f"{prompt}\n{sticker_note}"
+
         user_content: list[dict[str, Any]] = [
             {"type": "text", "text": prompt}
         ]
@@ -432,7 +476,15 @@ async def _generate_reply_locked(
         )
         messages = _build_request_messages(session_key, user_content)
 
-        marker = f"（用户发送了 {len(payloads)} 张图片）"
+        image_count = len(payloads) - len(sticker_records)
+        markers: list[str] = []
+        if image_count:
+            markers.append(f"（用户发送了 {image_count} 张图片）")
+        if sticker_records:
+            markers.append(
+                f"（用户发送了 {len(sticker_records)} 个表情包）"
+            )
+        marker = "".join(markers)
         history_text = f"{text}\n{marker}".strip() if text else marker
     else:
         messages = _build_request_messages(session_key, text)
@@ -450,6 +502,7 @@ async def _generate_reply_locked(
                     plugin_config.deepseek_custom_prompt_enabled
                 ),
                 include_poke=plugin_config.deepseek_poke_enabled,
+                include_stickers=plugin_config.deepseek_sticker_enabled,
             ),
             tool_runner=run_tool,
             max_tool_rounds=plugin_config.deepseek_tool_max_rounds,

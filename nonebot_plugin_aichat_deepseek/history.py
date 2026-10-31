@@ -55,6 +55,25 @@ CREATE TABLE IF NOT EXISTS user_prompts (
     content TEXT NOT NULL,
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+CREATE TABLE IF NOT EXISTS stickers (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_key TEXT NOT NULL,
+    sha256 TEXT NOT NULL,
+    file_path TEXT NOT NULL,
+    mime TEXT NOT NULL DEFAULT '',
+    description TEXT NOT NULL DEFAULT '',
+    tags TEXT NOT NULL DEFAULT '',
+    source TEXT NOT NULL DEFAULT 'user',
+    use_count INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    last_used_at TEXT,
+    UNIQUE (session_key, sha256)
+);
+
+CREATE INDEX IF NOT EXISTS idx_stickers_session
+    ON stickers (session_key, updated_at, id);
 """
 
 
@@ -291,6 +310,222 @@ class ConversationStore:
             cursor = self._conn.execute(
                 "DELETE FROM memories WHERE id = ? AND session_key = ?",
                 (memory_id, key),
+            )
+        return cursor.rowcount > 0
+
+    def add_sticker(
+        self,
+        key: str,
+        sha256: str,
+        file_path: str | Path,
+        *,
+        mime: str = "",
+        description: str = "",
+        tags: str = "",
+        source: str = "user",
+    ) -> dict[str, Any]:
+        """保存表情包元数据；同一用户下相同哈希只保留一条。"""
+        sha256 = sha256.strip()
+        if not sha256:
+            raise ValueError("表情包哈希不能为空")
+
+        target = str(Path(file_path).expanduser())
+        now = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
+        existing = self._conn.execute(
+            "SELECT id FROM stickers WHERE session_key = ? AND sha256 = ?",
+            (key, sha256),
+        ).fetchone()
+
+        with self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO stickers (
+                    session_key, sha256, file_path, mime,
+                    description, tags, source, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(session_key, sha256) DO UPDATE SET
+                    file_path = excluded.file_path,
+                    mime = CASE
+                        WHEN excluded.mime <> '' THEN excluded.mime
+                        ELSE stickers.mime
+                    END,
+                    description = CASE
+                        WHEN excluded.description <> ''
+                        THEN excluded.description
+                        ELSE stickers.description
+                    END,
+                    tags = CASE
+                        WHEN excluded.tags <> '' THEN excluded.tags
+                        ELSE stickers.tags
+                    END,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    key,
+                    sha256,
+                    target,
+                    mime,
+                    description.strip(),
+                    tags.strip(),
+                    source,
+                    now,
+                    now,
+                ),
+            )
+            row = self._conn.execute(
+                "SELECT id, description, tags FROM stickers "
+                "WHERE session_key = ? AND sha256 = ?",
+                (key, sha256),
+            ).fetchone()
+
+        sticker_id, saved_description, saved_tags = row
+        return {
+            "id": int(sticker_id),
+            "sha256": sha256,
+            "file_path": target,
+            "mime": mime,
+            "description": saved_description,
+            "tags": saved_tags,
+            "source": source,
+            "created": existing is None,
+        }
+
+    def get_sticker(self, key: str, sticker_id: int) -> dict[str, Any] | None:
+        row = self._conn.execute(
+            "SELECT id, sha256, file_path, mime, description, tags, source, "
+            "use_count, created_at, updated_at, last_used_at "
+            "FROM stickers WHERE id = ? AND session_key = ?",
+            (sticker_id, key),
+        ).fetchone()
+        if row is None:
+            return None
+
+        (
+            found_id,
+            sha256,
+            file_path,
+            mime,
+            description,
+            tags,
+            source,
+            use_count,
+            created_at,
+            updated_at,
+            last_used_at,
+        ) = row
+        return {
+            "id": int(found_id),
+            "sha256": sha256,
+            "file_path": file_path,
+            "mime": mime,
+            "description": description,
+            "tags": tags,
+            "source": source,
+            "use_count": int(use_count),
+            "created_at": created_at,
+            "updated_at": updated_at,
+            "last_used_at": last_used_at,
+        }
+
+    def search_stickers(
+        self,
+        key: str,
+        keyword: str | None = None,
+        limit: int = 10,
+    ) -> list[dict[str, Any]]:
+        """按含义/标签关键词查询当前用户的表情包。"""
+        limit = max(1, min(int(limit), 50))
+        clauses = ["session_key = ?"]
+        params: list[Any] = [key]
+
+        if keyword:
+            escaped = (
+                keyword.replace("\\", "\\\\")
+                .replace("%", "\\%")
+                .replace("_", "\\_")
+            )
+            clauses.append(
+                "(description LIKE ? ESCAPE '\\' "
+                "OR tags LIKE ? ESCAPE '\\')"
+            )
+            params.extend([f"%{escaped}%", f"%{escaped}%"])
+
+        params.append(limit)
+        rows = self._conn.execute(
+            "SELECT id, sha256, file_path, mime, description, tags, "
+            "use_count, updated_at "
+            f"FROM stickers WHERE {' AND '.join(clauses)} "
+            "ORDER BY use_count DESC, updated_at DESC, id DESC LIMIT ?",
+            params,
+        ).fetchall()
+        return [
+            {
+                "id": int(sticker_id),
+                "sha256": sha256,
+                "file_path": file_path,
+                "mime": mime,
+                "description": description,
+                "tags": tags,
+                "use_count": int(use_count),
+                "updated_at": updated_at,
+            }
+            for (
+                sticker_id,
+                sha256,
+                file_path,
+                mime,
+                description,
+                tags,
+                use_count,
+                updated_at,
+            ) in rows
+        ]
+
+    def update_sticker_description(
+        self,
+        key: str,
+        sticker_id: int,
+        description: str,
+        tags: str | None = None,
+    ) -> bool:
+        """记录或更新表情包的含义；``tags`` 为 ``None`` 时保留原标签。"""
+        description = description.strip()
+        if not description:
+            raise ValueError("表情包含义不能为空")
+
+        now = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
+        assignments = ["description = ?", "updated_at = ?"]
+        params: list[Any] = [description, now]
+        if tags is not None:
+            assignments.append("tags = ?")
+            params.append(tags.strip())
+        params.extend([sticker_id, key])
+
+        with self._conn:
+            cursor = self._conn.execute(
+                f"UPDATE stickers SET {', '.join(assignments)} "
+                "WHERE id = ? AND session_key = ?",
+                params,
+            )
+        return cursor.rowcount > 0
+
+    def record_sticker_used(self, key: str, sticker_id: int) -> bool:
+        """记录一次表情包发送，用于后续按使用频率排序。"""
+        now = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
+        with self._conn:
+            cursor = self._conn.execute(
+                "UPDATE stickers SET use_count = use_count + 1, "
+                "last_used_at = ?, updated_at = ? "
+                "WHERE id = ? AND session_key = ?",
+                (now, now, sticker_id, key),
+            )
+        return cursor.rowcount > 0
+
+    def delete_sticker(self, key: str, sticker_id: int) -> bool:
+        with self._conn:
+            cursor = self._conn.execute(
+                "DELETE FROM stickers WHERE id = ? AND session_key = ?",
+                (sticker_id, key),
             )
         return cursor.rowcount > 0
 

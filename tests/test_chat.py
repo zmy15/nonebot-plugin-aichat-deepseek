@@ -643,6 +643,72 @@ async def test_reply_with_image_uploads_and_sends(
     assert sent == ["图片里是一只猫"]
 
 
+async def test_reply_with_sticker_saves_and_notes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    from nonebot_plugin_aichat_deepseek import chat as chat_module
+    from nonebot_plugin_aichat_deepseek.config import plugin_config
+    from nonebot_plugin_aichat_deepseek.images import ImagePayload
+
+    png = b"\x89PNG\r\n\x1a\n" + b"0" * 16
+
+    class StickerClient:
+        configured = True
+
+        def __init__(self) -> None:
+            self.messages: list[dict] | None = None
+
+        async def upload_image(
+            self, data: bytes, filename: str, content_type: str, **kwargs
+        ) -> str:
+            return "file-api-sticker"
+
+        async def chat_with_tools(self, messages, **kwargs) -> str:
+            self.messages = messages
+            return "哈哈"
+
+    fake = StickerClient()
+
+    async def fake_fetch_image(segment, **kwargs) -> ImagePayload:
+        return ImagePayload(png, "sticker.png", "image/png")
+
+    monkeypatch.setattr(chat_module, "client", fake)
+    monkeypatch.setattr(chat_module, "fetch_image", fake_fetch_image)
+    monkeypatch.setattr(
+        plugin_config,
+        "deepseek_sticker_dir",
+        str(tmp_path / "stickers"),
+    )
+    for sticker in chat_module.store.search_stickers("4:4", limit=50):
+        chat_module.store.delete_sticker("4:4", sticker["id"])
+    chat_module.store.clear("4:4")
+
+    sent: list[str] = []
+
+    async def send(message: str) -> None:
+        sent.append(message)
+
+    await chat_module.reply(
+        "4:4",
+        "",
+        send,
+        images=[{"sub_type": 1, "url": "https://example.com/s.png"}],
+    )
+
+    records = chat_module.store.search_stickers("4:4")
+    assert len(records) == 1
+
+    assert fake.messages is not None
+    note = fake.messages[-1]["content"][0]["text"]
+    assert f"#{records[0]['id']}" in note
+    assert "describe_sticker" in note
+    assert "send_sticker" in note
+
+    stored = chat_module.store.build_messages("4:4")
+    assert "（用户发送了 1 个表情包）" in stored[0]["content"]
+    assert sent == ["哈哈"]
+
+
 async def test_process_private_message_passes_image(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

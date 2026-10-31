@@ -53,6 +53,13 @@ def images_mod():
 
 
 @pytest.fixture
+def stickers_mod():
+    import nonebot_plugin_aichat_deepseek.stickers as module
+
+    return module
+
+
+@pytest.fixture
 def aggregator_mod():
     import nonebot_plugin_aichat_deepseek.aggregator as module
 

@@ -41,6 +41,15 @@ class Config(BaseModel):
     deepseek_custom_prompt_enabled: bool = True
     deepseek_custom_prompt_max_chars: int = Field(default=2000, ge=1)
 
+    # 表情包：自动收藏私聊收到的表情包，供模型按含义查询和发送
+    deepseek_sticker_enabled: bool = True
+    # 表情包图片保存目录。相对路径基于机器人启动目录
+    deepseek_sticker_dir: str = "data/nonebot_plugin_aichat_deepseek/stickers"
+    # 单条消息最多自动收藏几个表情包
+    deepseek_sticker_max_count: int = Field(default=4, ge=1)
+    # 查询表情包时最多返回多少条
+    deepseek_sticker_search_limit: int = Field(default=10, ge=1, le=20)
+
     # 图片理解（Files API）
     deepseek_image_enabled: bool = True
     deepseek_image_max_bytes: int = Field(
