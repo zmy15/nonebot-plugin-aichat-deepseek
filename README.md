@@ -45,6 +45,7 @@ pip install nonebot-plugin-aichat-deepseek
 ```dotenv
 DEEPSEEK_API_KEY=sk-xxxxxxxx
 DEEPSEEK_MODEL=deepseek-flash
+DEEPSEEK_SYSTEM_PROMPT="你是一个乐于助人的 AI 助手，请使用简体中文回答用户的问题。"
 DEEPSEEK_DB_PATH=data/nonebot_plugin_aichat_deepseek/chat.db
 DEEPSEEK_TOOLS_ENABLED=true
 DEEPSEEK_TOOL_MAX_ROUNDS=3
@@ -97,7 +98,7 @@ DEEPSEEK_REPLY_INTERVAL=1.0
 | `DEEPSEEK_REPLY_DELAY` | `float` | `1.0` | 首条回复前的随机延迟（秒） |
 | `DEEPSEEK_REPLY_DELAY_JITTER` | `float` | `0.5` | 首条回复延迟的随机抖动范围（±秒） |
 | `DEEPSEEK_TIMEOUT` | `float` | `60.0` | 单次请求超时（秒） |
-| `DEEPSEEK_SYSTEM_PROMPT` | `str` | 内置中文助手提示词 | 人设提示词；插件会自动追加纯文本与分隔符输出要求 |
+| `DEEPSEEK_SYSTEM_PROMPT` | `str` | `你是一个乐于助人的 AI 助手，请使用简体中文回答用户的问题。` | 默认 system 角色身份提示词；插件会自动追加纯文本与分隔符输出要求 |
 | `DEEPSEEK_TEMPERATURE` | `float` | `1.0` | 采样温度，范围 0–2 |
 | `DEEPSEEK_MAX_TOKENS` | `int \| None` | `None` | 最大输出 token 数，不填使用服务端默认值 |
 | `DEEPSEEK_THINKING` | `bool \| None` | `None` | 是否开启思考模式；`None` 表示不发送该字段、使用服务端默认值 |
