@@ -138,6 +138,29 @@ DEEPSEEK_REPLY_INTERVAL=1.0
 - 聚合状态只在内存中，机器人重启后会丢失；
 - 首条回复延迟和多条消息之间的间隔是两套独立配置，分别控制“打字停顿”和“分条发送节奏”。
 
+## 日志
+
+每次用户消息、API 调用和最终回复都会记录日志，方便排查“有没有回复”和缓存命中情况。
+
+示例：
+
+```text
+[chat] incoming session=12345:67890 text_len=8 images=0 aggregate=True
+[chat] aggregated session=12345:67890 text_len=8 images=0
+[deepseek] session=12345:67890 phase=reply cache_hit=512 cache_miss=128 prompt_tokens=640 completion_tokens=96
+[chat] reply qid=a1b2c3d4 session=12345:67890 replied=true reason=ok segments=2 api_calls=1 cache_hit=512 cache_miss=128 prompt_tokens=640 completion_tokens=96
+```
+
+- `incoming`：收到一条用户消息，记录文本长度和图片数量；
+- `question`：一次完整提问开始处理，带 `qid`；
+- `aggregated`：连续消息聚合完成后进入处理；
+- `deepseek`：每次 API 调用的缓存命中、未命中、输入/输出 token；
+- `reply`：最终是否回复、原因、分条数量、累计 token；
+- 判断为不完整时记录 `[chat] no_reply ... reason=incomplete`；
+- 未配置 Key、图片错误、API 错误、发送失败等会记录 `replied=false` 及原因。
+
+日志只记录文本长度，不记录用户完整原文。缓存命中取自 DeepSeek 返回的 `prompt_cache_hit_tokens` / `prompt_cache_miss_tokens`（兼容 `prompt_tokens_details.cached_tokens`）。
+
 ## 图片理解
 
 私聊可以直接发送图片，也可以图片加文字一起发送。

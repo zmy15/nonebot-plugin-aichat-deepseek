@@ -16,6 +16,7 @@ import httpx
 from nonebot import logger
 
 ToolRunner = Callable[[str, str], Awaitable[str]]
+UsageCallback = Callable[[Mapping[str, Any]], None]
 
 
 class ChatMessage(TypedDict):
@@ -142,6 +143,7 @@ class DeepSeekClient:
         messages: Sequence[Mapping[str, Any]],
         *,
         tools: Sequence[Mapping[str, Any]] | None = None,
+        on_usage: UsageCallback | None = None,
     ) -> dict[str, Any]:
         if not self._api_key:
             raise DeepSeekError("未配置 DEEPSEEK_API_KEY")
@@ -178,11 +180,21 @@ class DeepSeekClient:
         usage = data.get("usage")
         if usage:
             logger.debug(f"DeepSeek token 用量：{usage}")
+            if on_usage is not None:
+                try:
+                    on_usage(usage)
+                except Exception:
+                    logger.exception("DeepSeek usage 回调执行失败")
         return data
 
-    async def chat(self, messages: Sequence[Mapping[str, Any]]) -> str:
+    async def chat(
+        self,
+        messages: Sequence[Mapping[str, Any]],
+        *,
+        on_usage: UsageCallback | None = None,
+    ) -> str:
         """发送对话消息并返回模型回复文本。"""
-        data = await self._request(messages)
+        data = await self._request(messages, on_usage=on_usage)
         return self._extract_content(data)
 
     async def upload_image(
@@ -244,13 +256,18 @@ class DeepSeekClient:
         tools: Sequence[Mapping[str, Any]],
         tool_runner: ToolRunner,
         max_tool_rounds: int = 3,
+        on_usage: UsageCallback | None = None,
     ) -> str:
         """自动执行模型请求的工具，直到模型给出最终文本回复。"""
         working: list[dict[str, Any]] = [dict(message) for message in messages]
         rounds = max(1, max_tool_rounds)
 
         for _ in range(rounds):
-            data = await self._request(working, tools=tools)
+            data = await self._request(
+                working,
+                tools=tools,
+                on_usage=on_usage,
+            )
             message = self._extract_message(data)
             tool_calls = message.get("tool_calls")
             if not tool_calls:
@@ -306,5 +323,5 @@ class DeepSeekClient:
                 )
 
         # 工具调用次数达到上限后，强制模型给出普通文本回复
-        data = await self._request(working)
+        data = await self._request(working, on_usage=on_usage)
         return self._extract_content(data)

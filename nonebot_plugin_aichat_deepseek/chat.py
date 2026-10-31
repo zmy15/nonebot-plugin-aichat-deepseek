@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import random
+import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import datetime
 from typing import Any
@@ -102,6 +103,72 @@ def next_initial_delay() -> float:
     if delay <= 0 and jitter <= 0:
         return 0.0
     return max(0.0, delay + random.uniform(-jitter, jitter))
+
+
+def _usage_numbers(usage: Mapping[str, Any]) -> tuple[int, int, int, int]:
+    """返回 cache_hit / cache_miss / prompt_tokens / completion_tokens。"""
+    prompt_tokens = int(usage.get("prompt_tokens") or 0)
+    details = usage.get("prompt_tokens_details")
+    cached = details.get("cached_tokens") if isinstance(details, dict) else None
+
+    cache_hit = usage.get("prompt_cache_hit_tokens", cached)
+    cache_hit = int(cache_hit or 0)
+    cache_miss = usage.get("prompt_cache_miss_tokens")
+    cache_miss = (
+        int(cache_miss)
+        if cache_miss is not None
+        else max(0, prompt_tokens - cache_hit)
+    )
+    completion_tokens = int(usage.get("completion_tokens") or 0)
+    return cache_hit, cache_miss, prompt_tokens, completion_tokens
+
+
+def _merge_usage(total: dict[str, int], usage: Mapping[str, Any]) -> None:
+    cache_hit, cache_miss, prompt_tokens, completion_tokens = _usage_numbers(
+        usage
+    )
+    total["calls"] = total.get("calls", 0) + 1
+    total["cache_hit"] = total.get("cache_hit", 0) + cache_hit
+    total["cache_miss"] = total.get("cache_miss", 0) + cache_miss
+    total["prompt_tokens"] = total.get("prompt_tokens", 0) + prompt_tokens
+    total["completion_tokens"] = (
+        total.get("completion_tokens", 0) + completion_tokens
+    )
+
+
+def _log_api_usage(
+    session_key: str,
+    phase: str,
+    usage: Mapping[str, Any],
+) -> None:
+    cache_hit, cache_miss, prompt_tokens, completion_tokens = _usage_numbers(
+        usage
+    )
+    logger.info(
+        f"[deepseek] session={session_key} phase={phase} "
+        f"cache_hit={cache_hit} cache_miss={cache_miss} "
+        f"prompt_tokens={prompt_tokens} "
+        f"completion_tokens={completion_tokens}"
+    )
+
+
+def _log_reply(
+    qid: str,
+    session_key: str,
+    replied: bool,
+    reason: str,
+    usage: dict[str, int],
+    segments: int = 0,
+) -> None:
+    logger.info(
+        f"[chat] reply qid={qid} session={session_key} "
+        f"replied={str(replied).lower()} reason={reason} "
+        f"segments={segments} api_calls={usage.get('calls', 0)} "
+        f"cache_hit={usage.get('cache_hit', 0)} "
+        f"cache_miss={usage.get('cache_miss', 0)} "
+        f"prompt_tokens={usage.get('prompt_tokens', 0)} "
+        f"completion_tokens={usage.get('completion_tokens', 0)}"
+    )
 
 
 def _format_error(exc: DeepSeekError) -> str:
@@ -235,7 +302,10 @@ async def compress_if_needed(session_key: str) -> None:
     previous_summary = store.get_summary(session_key)
     try:
         summary = await client.chat(
-            _build_summary_messages(previous_summary, batch)
+            _build_summary_messages(previous_summary, batch),
+            on_usage=lambda usage: _log_api_usage(
+                session_key, "compression", usage
+            ),
         )
     except DeepSeekError as exc:
         logger.warning(
@@ -264,7 +334,14 @@ async def _generate_reply_locked(
     session_key: str,
     text: str,
     images: Sequence[Mapping[str, Any]] | None = None,
+    usage: dict[str, int] | None = None,
 ) -> str:
+    usage_total = usage if usage is not None else {}
+
+    def record_usage(usage_data: Mapping[str, Any]) -> None:
+        _merge_usage(usage_total, usage_data)
+        _log_api_usage(session_key, "reply", usage_data)
+
     history_text = text
 
     if images:
@@ -321,9 +398,10 @@ async def _generate_reply_locked(
             ),
             tool_runner=run_tool,
             max_tool_rounds=plugin_config.deepseek_tool_max_rounds,
+            on_usage=record_usage,
         )
     else:
-        answer = await client.chat(messages)
+        answer = await client.chat(messages, on_usage=record_usage)
 
     store.add_turn(session_key, history_text, answer)
     return answer
@@ -346,25 +424,49 @@ async def reply(
     images: Sequence[Mapping[str, Any]] | None = None,
 ) -> None:
     """生成回复并发送；出错时回复一条可读的错误提示。"""
+    qid = uuid.uuid4().hex[:8]
+    usage: dict[str, int] = {}
+    logger.info(
+        f"[chat] question qid={qid} session={session_key} "
+        f"text_len={len(text)} images={len(images or [])}"
+    )
+
     if not client.configured:
+        _log_reply(qid, session_key, False, "no_api_key", usage)
         await send(MISSING_API_KEY_TIP)
         return
 
     async with store.lock(session_key):
         try:
-            answer = await _generate_reply_locked(session_key, text, images)
+            answer = await _generate_reply_locked(
+                session_key, text, images, usage
+            )
         except ImageError as exc:
             logger.warning(f"图片处理失败：{exc}")
+            _log_reply(qid, session_key, False, "image_error", usage)
             await send(f"图片处理失败：{exc}")
             return
         except DeepSeekError as exc:
             logger.warning(
                 f"DeepSeek 调用失败（status={exc.status_code}）：{exc.message}"
             )
+            reason = (
+                "api_error"
+                if exc.status_code is None
+                else f"api_error_{exc.status_code}"
+            )
+            _log_reply(
+                qid,
+                session_key,
+                False,
+                reason,
+                usage,
+            )
             await send(_format_error(exc))
             return
         except Exception:
             logger.exception("DeepSeek 对话处理出现未预期异常")
+            _log_reply(qid, session_key, False, "exception", usage)
             await send("处理对话时出错了，请稍后再试。")
             return
 
@@ -381,12 +483,33 @@ async def reply(
         if initial_delay > 0:
             await asyncio.sleep(initial_delay)
 
-        for index, message in enumerate(messages):
-            if index:
-                delay = next_reply_interval()
-                if delay > 0:
-                    await asyncio.sleep(delay)
-            await send(message)
+        try:
+            for index, message in enumerate(messages):
+                if index:
+                    delay = next_reply_interval()
+                    if delay > 0:
+                        await asyncio.sleep(delay)
+                await send(message)
+        except Exception:
+            logger.exception("发送回复失败")
+            _log_reply(
+                qid,
+                session_key,
+                False,
+                "send_error",
+                usage,
+                len(messages),
+            )
+            return
+
+        _log_reply(
+            qid,
+            session_key,
+            True,
+            "ok",
+            usage,
+            len(messages),
+        )
 
         try:
             await compress_if_needed(session_key)
@@ -416,14 +539,22 @@ async def _is_message_complete(
         ]
         messages.extend(store.build_messages(session_key)[-6:])
         messages.append({"role": "user", "content": text})
-        answer = await client.chat(messages)
+        answer = await client.chat(
+            messages,
+            on_usage=lambda usage: _log_api_usage(
+                session_key, "completeness", usage
+            ),
+        )
     except Exception:
         logger.exception("消息完整性判断失败，按完整处理")
         return True
 
     upper = answer.strip().upper()
     if "INCOMPLETE" in upper or "不完整" in answer:
-        logger.debug(f"消息不完整，等待用户继续：{session_key}")
+        logger.info(
+            f"[chat] no_reply session={session_key} reason=incomplete "
+            f"text_len={len(text)}"
+        )
         return False
     return True
 
@@ -434,6 +565,10 @@ async def _handle_aggregated(
     images: list[dict[str, Any]],
     send: Sender,
 ) -> None:
+    logger.info(
+        f"[chat] aggregated session={session_key} "
+        f"text_len={len(text)} images={len(images)}"
+    )
     await reply(session_key, text, send, images=images)
 
 
@@ -450,21 +585,33 @@ async def process_private_message(event: PrivateMessageEvent, send: Sender) -> N
     images = [
         segment.data for segment in event.message if segment.type == "image"
     ]
+    session_key = _session_key(event)
+    logger.info(
+        f"[chat] incoming session={session_key} text_len={len(text)} "
+        f"images={len(images)} "
+        f"aggregate={plugin_config.deepseek_aggregate_messages}"
+    )
 
     if images and not plugin_config.deepseek_image_enabled:
         if not text:
+            logger.info(
+                f"[chat] reply session={session_key} "
+                f"replied=true reason=image_disabled tip_sent=true"
+            )
             await send(IMAGE_DISABLED_TIP)
             return
         images = []
 
     if not text and not images:
+        logger.debug(f"[chat] ignored session={session_key} reason=empty")
         return
     if event.user_id == event.self_id:
+        logger.debug(f"[chat] ignored session={session_key} reason=self")
         return
     if text and _starts_with_command(text):
+        logger.debug(f"[chat] ignored session={session_key} reason=command")
         return
 
-    session_key = _session_key(event)
     if plugin_config.deepseek_aggregate_messages:
         await message_aggregator.add(session_key, text, images, send)
     else:

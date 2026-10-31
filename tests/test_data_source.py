@@ -370,6 +370,30 @@ async def test_tool_runner_error_is_reported_to_model(ds) -> None:
     assert "执行失败" in tool_message["content"]
 
 
+async def test_usage_callback(ds) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": "ok"}}],
+                "usage": {
+                    "prompt_tokens": 100,
+                    "completion_tokens": 10,
+                    "prompt_cache_hit_tokens": 40,
+                    "prompt_cache_miss_tokens": 60,
+                    "prompt_tokens_details": {"cached_tokens": 40},
+                },
+            },
+        )
+
+    seen: list[dict] = []
+    client = make_client(ds.DeepSeekClient, handler)
+    await client.chat(MESSAGES, on_usage=seen.append)
+
+    assert seen[0]["prompt_cache_hit_tokens"] == 40
+    assert seen[0]["prompt_cache_miss_tokens"] == 60
+
+
 async def test_upload_image_uses_files_api(ds) -> None:
     requests: list[httpx.Request] = []
 

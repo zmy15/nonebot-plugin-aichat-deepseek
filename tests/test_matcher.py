@@ -11,7 +11,9 @@ class FakeClient:
         self.replies = list(replies)
         self.requests: list[list[dict[str, str]]] = []
 
-    async def chat(self, messages: list[dict[str, str]]) -> str:
+    async def chat(
+        self, messages: list[dict[str, str]], **kwargs: Any
+    ) -> str:
         self.requests.append(list(messages))
         return self.replies.pop(0)
 

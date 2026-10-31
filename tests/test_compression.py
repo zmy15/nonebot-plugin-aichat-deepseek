@@ -6,7 +6,9 @@ class FakeClient:
         self.error = error
         self.requests: list[list[dict[str, str]]] = []
 
-    async def chat(self, messages: list[dict[str, str]]) -> str:
+    async def chat(
+        self, messages: list[dict[str, str]], **kwargs
+    ) -> str:
         self.requests.append(list(messages))
         if self.error is not None:
             raise self.error

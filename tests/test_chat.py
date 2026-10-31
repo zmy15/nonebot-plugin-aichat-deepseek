@@ -11,7 +11,9 @@ class FakeClient:
         self.error = error
         self.requests: list[list[dict[str, str]]] = []
 
-    async def chat(self, messages: list[dict[str, str]]) -> str:
+    async def chat(
+        self, messages: list[dict[str, str]], **kwargs: Any
+    ) -> str:
         self.requests.append(list(messages))
         if self.error is not None:
             raise self.error
@@ -285,6 +287,29 @@ def test_next_initial_delay(monkeypatch: pytest.MonkeyPatch) -> None:
         assert 0.7 <= chat_module.next_initial_delay() <= 1.3
 
 
+def test_usage_helpers() -> None:
+    from nonebot_plugin_aichat_deepseek import chat as chat_module
+
+    usage = {
+        "prompt_tokens": 100,
+        "completion_tokens": 10,
+        "prompt_cache_hit_tokens": 40,
+        "prompt_cache_miss_tokens": 60,
+        "prompt_tokens_details": {"cached_tokens": 40},
+    }
+    assert chat_module._usage_numbers(usage) == (40, 60, 100, 10)
+
+    total: dict[str, int] = {}
+    chat_module._merge_usage(total, usage)
+    assert total == {
+        "calls": 1,
+        "cache_hit": 40,
+        "cache_miss": 60,
+        "prompt_tokens": 100,
+        "completion_tokens": 10,
+    }
+
+
 async def test_completeness_check(monkeypatch: pytest.MonkeyPatch) -> None:
     from nonebot_plugin_aichat_deepseek import chat as chat_module
 
@@ -294,7 +319,7 @@ async def test_completeness_check(monkeypatch: pytest.MonkeyPatch) -> None:
         def __init__(self, answer: str) -> None:
             self.answer = answer
 
-        async def chat(self, messages) -> str:
+        async def chat(self, messages, **kwargs) -> str:
             return self.answer
 
     monkeypatch.setattr(
@@ -451,7 +476,13 @@ async def test_reply_tool_can_query_history(
             self.tool_result = ""
 
         async def chat_with_tools(
-            self, messages, *, tools, tool_runner, max_tool_rounds
+            self,
+            messages,
+            *,
+            tools,
+            tool_runner,
+            max_tool_rounds,
+            **kwargs,
         ) -> str:
             self.tool_result = await tool_runner(
                 "query_chat_history", '{"keyword":"旧"}'
@@ -484,7 +515,13 @@ async def test_reply_tool_can_save_memory(
         configured = True
 
         async def chat_with_tools(
-            self, messages, *, tools, tool_runner, max_tool_rounds
+            self,
+            messages,
+            *,
+            tools,
+            tool_runner,
+            max_tool_rounds,
+            **kwargs,
         ) -> str:
             await tool_runner(
                 "save_user_memory",
@@ -534,7 +571,13 @@ async def test_reply_with_image_uploads_and_sends(
             return "file-api-test"
 
         async def chat_with_tools(
-            self, messages, *, tools, tool_runner, max_tool_rounds
+            self,
+            messages,
+            *,
+            tools,
+            tool_runner,
+            max_tool_rounds,
+            **kwargs,
         ) -> str:
             self.messages = messages
             return "图片里是一只猫"
