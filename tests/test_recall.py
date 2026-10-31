@@ -130,6 +130,104 @@ async def test_recall_multiple_in_group(store_cls) -> None:
     store.close()
 
 
+async def test_recall_by_content_keyword(store_cls) -> None:
+    from nonebot_plugin_aichat_deepseek import sent_messages
+    from nonebot_plugin_aichat_deepseek.tools.base import ToolContext
+    from nonebot_plugin_aichat_deepseek.tools.recall_message import execute
+
+    store = store_cls()
+    bot = FakeBot()
+    sent_messages.record("1:2", 71, "抱歉，我说错了")
+    sent_messages.record("1:2", 72, "稍等一下")
+    sent_messages.record("1:2", 73, "抱歉，再补一句")
+    ctx = ToolContext(
+        session_key="1:2",
+        store=store,
+        get_bot=lambda bot_id: bot,
+        chat_type="private",
+    )
+
+    result = json.loads(
+        await execute({"keyword": "抱歉", "count": 1}, ctx)
+    )
+
+    assert [call[1]["message_id"] for call in bot.calls] == [73]
+    assert result["keyword"] == "抱歉"
+    assert [item.message_id for item in sent_messages.recent("1:2", 5)] == [
+        71,
+        72,
+    ]
+    store.close()
+
+
+async def test_recall_by_keyword_multiple_matches(store_cls) -> None:
+    from nonebot_plugin_aichat_deepseek import sent_messages
+    from nonebot_plugin_aichat_deepseek.tools.base import ToolContext
+    from nonebot_plugin_aichat_deepseek.tools.recall_message import execute
+
+    store = store_cls()
+    bot = FakeBot()
+    sent_messages.record("1:2", 74, "Sorry，第一条")
+    sent_messages.record("1:2", 75, "无关消息")
+    sent_messages.record("1:2", 76, "sorry，第二条")
+    ctx = ToolContext(
+        session_key="1:2",
+        store=store,
+        get_bot=lambda bot_id: bot,
+        chat_type="private",
+    )
+
+    result = json.loads(
+        await execute({"keyword": "SORRY", "count": 2}, ctx)
+    )
+
+    assert [call[1]["message_id"] for call in bot.calls] == [76, 74]
+    assert len(result["recalled"]) == 2
+    assert [item.message_id for item in sent_messages.recent("1:2", 5)] == [
+        75
+    ]
+    store.close()
+
+
+async def test_recall_by_keyword_without_match(store_cls) -> None:
+    from nonebot_plugin_aichat_deepseek import sent_messages
+    from nonebot_plugin_aichat_deepseek.tools.base import ToolContext
+    from nonebot_plugin_aichat_deepseek.tools.recall_message import execute
+
+    store = store_cls()
+    sent_messages.record("1:2", 77, "正常内容")
+    ctx = ToolContext(
+        session_key="1:2",
+        store=store,
+        get_bot=lambda bot_id: FakeBot(),
+        chat_type="private",
+    )
+
+    result = await execute({"keyword": "不存在"}, ctx)
+
+    assert "没有找到包含“不存在”" in result
+    assert [item.message_id for item in sent_messages.recent("1:2")] == [77]
+    store.close()
+
+
+async def test_recall_keyword_must_be_string(store_cls) -> None:
+    from nonebot_plugin_aichat_deepseek.tools.base import ToolContext
+    from nonebot_plugin_aichat_deepseek.tools.recall_message import execute
+
+    store = store_cls()
+    ctx = ToolContext(
+        session_key="1:2",
+        store=store,
+        get_bot=lambda bot_id: FakeBot(),
+        chat_type="private",
+    )
+
+    result = await execute({"keyword": 1}, ctx)
+
+    assert "keyword 必须是字符串" in result
+    store.close()
+
+
 async def test_recall_failure_keeps_record(store_cls) -> None:
     from nonebot_plugin_aichat_deepseek import sent_messages
     from nonebot_plugin_aichat_deepseek.tools.base import ToolContext
