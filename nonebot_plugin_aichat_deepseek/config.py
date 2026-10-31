@@ -36,6 +36,14 @@ class Config(BaseModel):
     # 对话上下文：保留最近多少轮（一问一答为一轮），0 表示不保留上下文
     deepseek_history_turns: int = Field(default=5, ge=0)
 
+    # 输出格式：模型用该分隔符把回复拆成多条消息发送
+    deepseek_split_delimiter: str = Field(default="|||", min_length=1)
+    # 多条消息之间的发送间隔（秒），以及随机抖动范围（±秒）
+    deepseek_reply_interval: float = Field(default=1.0, ge=0)
+    deepseek_reply_interval_jitter: float = Field(default=0.3, ge=0)
+    # 单次最多发送几条消息，超出的部分合并到最后一条
+    deepseek_reply_max_segments: int = Field(default=4, ge=1)
+
     # 单条回复的最大字符数，超出后分段发送（QQ 单条消息有字节上限，不宜过大）
     deepseek_reply_max_length: int = Field(default=1000, ge=1)
 

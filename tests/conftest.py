@@ -21,6 +21,13 @@ def ds():
 
 
 @pytest.fixture
+def fmt():
+    import nonebot_plugin_aichat_deepseek.formatting as module
+
+    return module
+
+
+@pytest.fixture
 def store_cls():
     from nonebot_plugin_aichat_deepseek.history import ConversationStore
 

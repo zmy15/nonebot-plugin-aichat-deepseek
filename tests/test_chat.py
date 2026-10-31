@@ -141,6 +141,8 @@ async def test_long_reply_is_split(
     fake = FakeClient(answer)
     monkeypatch.setattr(chat_module, "client", fake)
     monkeypatch.setattr(plugin_config, "deepseek_reply_max_length", 10)
+    monkeypatch.setattr(plugin_config, "deepseek_reply_interval", 0.0)
+    monkeypatch.setattr(plugin_config, "deepseek_reply_interval_jitter", 0.0)
     chat_module.store.clear("1:2")
 
     sent: list[str] = []
@@ -155,13 +157,102 @@ async def test_long_reply_is_split(
     assert "".join(sent) == answer
 
 
-def test_split_text() -> None:
-    from nonebot_plugin_aichat_deepseek.chat import split_text
+async def test_reply_splits_on_delimiter_with_interval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from nonebot_plugin_aichat_deepseek import chat as chat_module
+    from nonebot_plugin_aichat_deepseek.config import plugin_config
 
-    assert split_text("  ", 10) == []
-    assert split_text("short", 100) == ["short"]
-    assert split_text("abcdefghijklmnop", 5) == ["abcde", "fghij", "klmno", "p"]
-    assert split_text("line1\nline2\nline3", 12) == ["line1\nline2", "line3"]
+    fake = FakeClient("第一句|||第二句|||第三句")
+    monkeypatch.setattr(chat_module, "client", fake)
+    monkeypatch.setattr(plugin_config, "deepseek_reply_interval", 0.0)
+    monkeypatch.setattr(plugin_config, "deepseek_reply_interval_jitter", 0.0)
+    monkeypatch.setattr(chat_module, "next_reply_interval", lambda: 0.5)
+    chat_module.store.clear("1:2")
+
+    sent: list[str] = []
+    sleeps: list[float] = []
+
+    async def send(message: str) -> None:
+        sent.append(message)
+
+    async def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(chat_module.asyncio, "sleep", fake_sleep)
+
+    await chat_module.reply("1:2", "你好", send)
+
+    assert sent == ["第一句", "第二句", "第三句"]
+    assert sleeps == [0.5, 0.5]
+
+
+async def test_reply_removes_markdown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from nonebot_plugin_aichat_deepseek import chat as chat_module
+    from nonebot_plugin_aichat_deepseek.config import plugin_config
+
+    fake = FakeClient("**你好**|||# 标题|||`代码`")
+    monkeypatch.setattr(chat_module, "client", fake)
+    monkeypatch.setattr(plugin_config, "deepseek_reply_interval", 0.0)
+    monkeypatch.setattr(plugin_config, "deepseek_reply_interval_jitter", 0.0)
+    chat_module.store.clear("1:2")
+
+    sent: list[str] = []
+
+    async def send(message: str) -> None:
+        sent.append(message)
+
+    await chat_module.reply("1:2", "你好", send)
+
+    assert sent == ["你好", "标题", "代码"]
+
+
+async def test_empty_reply_gets_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from nonebot_plugin_aichat_deepseek import chat as chat_module
+
+    fake = FakeClient("|||")
+    monkeypatch.setattr(chat_module, "client", fake)
+    chat_module.store.clear("1:2")
+
+    sent: list[str] = []
+
+    async def send(message: str) -> None:
+        sent.append(message)
+
+    await chat_module.reply("1:2", "你好", send)
+
+    assert sent == [chat_module.EMPTY_REPLY_TIP]
+
+
+def test_next_reply_interval(monkeypatch: pytest.MonkeyPatch) -> None:
+    from nonebot_plugin_aichat_deepseek import chat as chat_module
+    from nonebot_plugin_aichat_deepseek.config import plugin_config
+
+    monkeypatch.setattr(plugin_config, "deepseek_reply_interval", 0.0)
+    monkeypatch.setattr(plugin_config, "deepseek_reply_interval_jitter", 0.0)
+    assert chat_module.next_reply_interval() == 0.0
+
+    monkeypatch.setattr(plugin_config, "deepseek_reply_interval", 1.0)
+    assert chat_module.next_reply_interval() == 1.0
+
+    monkeypatch.setattr(plugin_config, "deepseek_reply_interval_jitter", 0.2)
+    for _ in range(20):
+        assert 0.8 <= chat_module.next_reply_interval() <= 1.2
+
+
+def test_system_prompt_contains_output_rules() -> None:
+    from nonebot_plugin_aichat_deepseek import chat as chat_module
+    from nonebot_plugin_aichat_deepseek.config import plugin_config
+
+    prompt = chat_module._build_system_prompt()
+    assert plugin_config.deepseek_system_prompt in prompt
+    assert plugin_config.deepseek_split_delimiter in prompt
+    assert "纯文本" in prompt
+    assert "Markdown" in prompt
 
 
 def test_format_error() -> None:

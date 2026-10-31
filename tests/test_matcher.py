@@ -86,6 +86,25 @@ async def test_private_message_triggers_reply(
         ctx.should_call_send(event, "你好呀", result=None)
 
 
+async def test_private_message_can_send_multiple_messages(
+    app: App, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from nonebot_plugin_aichat_deepseek import chat
+
+    fake = FakeClient("第一句|||第二句")
+    monkeypatch.setattr(chat, "client", fake)
+    monkeypatch.setattr(chat, "next_reply_interval", lambda: 0.0)
+    chat.store.clear("1:2")
+
+    async with app.test_matcher(chat.private_chat) as ctx:
+        bot = make_bot(ctx)
+        event = make_private_event("你好")
+        ctx.receive_event(bot, event)
+        ctx.should_pass_rule()
+        ctx.should_call_send(event, "第一句", result=None)
+        ctx.should_call_send(event, "第二句", result=None)
+
+
 async def test_group_message_does_not_trigger(
     app: App, monkeypatch: pytest.MonkeyPatch
 ) -> None:

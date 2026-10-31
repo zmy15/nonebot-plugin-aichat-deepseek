@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import random
 from collections.abc import Awaitable, Callable
 
 from nonebot import get_driver, logger, on_message
@@ -15,11 +17,13 @@ from nonebot.rule import Rule
 
 from .config import plugin_config
 from .data_source import ChatMessage, DeepSeekClient, DeepSeekError
+from .formatting import split_reply
 from .history import ConversationStore
 
 Sender = Callable[[str], Awaitable[None]]
 
 MISSING_API_KEY_TIP = "还没有配置 DEEPSEEK_API_KEY，请先在 .env 中填写后再试。"
+EMPTY_REPLY_TIP = "……"
 
 client = DeepSeekClient(
     api_key=plugin_config.deepseek_api_key,
@@ -53,26 +57,13 @@ def _starts_with_command(text: str) -> bool:
     return any(prefix and text.startswith(prefix) for prefix in command_start)
 
 
-def split_text(text: str, limit: int) -> list[str]:
-    """把过长回复按换行或定长切分，尽量不切断单词行。"""
-    text = text.strip()
-    if not text:
-        return []
-    if limit <= 0:
-        return [text]
-
-    chunks: list[str] = []
-    while len(text) > limit:
-        cut = text.rfind("\n", 0, limit)
-        if cut < limit // 2:
-            cut = limit
-        chunk = text[:cut].strip()
-        if chunk:
-            chunks.append(chunk)
-        text = text[cut:].lstrip("\n")
-    if text.strip():
-        chunks.append(text.strip())
-    return chunks
+def next_reply_interval() -> float:
+    """计算两条消息之间的等待秒数，带随机抖动，避免机械感。"""
+    interval = plugin_config.deepseek_reply_interval
+    jitter = plugin_config.deepseek_reply_interval_jitter
+    if interval <= 0 and jitter <= 0:
+        return 0.0
+    return max(0.0, interval + random.uniform(-jitter, jitter))
 
 
 def _format_error(exc: DeepSeekError) -> str:
@@ -91,22 +82,39 @@ def _format_error(exc: DeepSeekError) -> str:
     return f"DeepSeek 请求失败：{detail}"
 
 
+def _build_system_prompt() -> str:
+    """在用户配置的人设之后追加纯文本、分隔符等输出约束。"""
+    persona = plugin_config.deepseek_system_prompt.strip()
+    delimiter = plugin_config.deepseek_split_delimiter.strip() or "|||"
+    rules = (
+        "输出要求：\n"
+        "1. 只输出纯文本，不要使用任何 Markdown 格式"
+        "（标题、加粗、斜体、代码块、引用、列表、表格、链接等）。\n"
+        f"2. 需要分成多条消息时，用 {delimiter} 分隔；"
+        "每条消息简短自然，像真人聊天。\n"
+        "3. 不要在回复中解释或提到分隔符。"
+    )
+    return f"{persona}\n\n{rules}" if persona else rules
+
+
 def _build_request_messages(session_key: str, text: str) -> list[ChatMessage]:
     messages = store.build_messages(session_key)
-    system_prompt = plugin_config.deepseek_system_prompt.strip()
-    if system_prompt:
-        messages.insert(0, {"role": "system", "content": system_prompt})
+    messages.insert(0, {"role": "system", "content": _build_system_prompt()})
     messages.append({"role": "user", "content": text})
     return messages
+
+
+async def _generate_reply_locked(session_key: str, text: str) -> str:
+    messages = _build_request_messages(session_key, text)
+    answer = await client.chat(messages)
+    store.add_turn(session_key, text, answer)
+    return answer
 
 
 async def generate_reply(session_key: str, text: str) -> str:
     """携带上下文请求模型，成功后把本轮问答写入历史。"""
     async with store.lock(session_key):
-        messages = _build_request_messages(session_key, text)
-        answer = await client.chat(messages)
-        store.add_turn(session_key, text, answer)
-        return answer
+        return await _generate_reply_locked(session_key, text)
 
 
 async def reply(session_key: str, text: str, send: Sender) -> None:
@@ -115,21 +123,35 @@ async def reply(session_key: str, text: str, send: Sender) -> None:
         await send(MISSING_API_KEY_TIP)
         return
 
-    try:
-        answer = await generate_reply(session_key, text)
-    except DeepSeekError as exc:
-        logger.warning(
-            f"DeepSeek 调用失败（status={exc.status_code}）：{exc.message}"
-        )
-        await send(_format_error(exc))
-        return
-    except Exception:
-        logger.exception("DeepSeek 对话处理出现未预期异常")
-        await send("处理对话时出错了，请稍后再试。")
-        return
+    async with store.lock(session_key):
+        try:
+            answer = await _generate_reply_locked(session_key, text)
+        except DeepSeekError as exc:
+            logger.warning(
+                f"DeepSeek 调用失败（status={exc.status_code}）：{exc.message}"
+            )
+            await send(_format_error(exc))
+            return
+        except Exception:
+            logger.exception("DeepSeek 对话处理出现未预期异常")
+            await send("处理对话时出错了，请稍后再试。")
+            return
 
-    for chunk in split_text(answer, plugin_config.deepseek_reply_max_length):
-        await send(chunk)
+        messages = split_reply(
+            answer,
+            delimiter=plugin_config.deepseek_split_delimiter,
+            max_segments=plugin_config.deepseek_reply_max_segments,
+            max_length=plugin_config.deepseek_reply_max_length,
+        )
+        if not messages:
+            messages = [EMPTY_REPLY_TIP]
+
+        for index, message in enumerate(messages):
+            if index:
+                delay = next_reply_interval()
+                if delay > 0:
+                    await asyncio.sleep(delay)
+            await send(message)
 
 
 async def process_private_message(event: PrivateMessageEvent, send: Sender) -> None:
