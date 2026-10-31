@@ -61,6 +61,7 @@ DEEPSEEK_HISTORY_TURNS=30
 DEEPSEEK_COMPRESSION_TRIGGER_TURNS=30
 DEEPSEEK_COMPRESSION_BATCH_MESSAGES=20
 DEEPSEEK_SPLIT_DELIMITER=|||
+DEEPSEEK_SPLIT_PARAGRAPHS=true
 DEEPSEEK_REPLY_INTERVAL=1.0
 ```
 
@@ -95,6 +96,7 @@ DEEPSEEK_REPLY_INTERVAL=1.0
 | `DEEPSEEK_COMPRESSION_TRIGGER_TURNS` | `int` | `30` | 未压缩消息超过多少轮时触发压缩，`0` 表示关闭 |
 | `DEEPSEEK_COMPRESSION_BATCH_MESSAGES` | `int` | `20` | 每次压缩最早多少条消息（用户和 AI 各算一条） |
 | `DEEPSEEK_SPLIT_DELIMITER` | `str` | `\|\|\|` | 模型用于分隔多条消息的标记 |
+| `DEEPSEEK_SPLIT_PARAGRAPHS` | `bool` | `True` | 模型没有输出分隔符时，是否按空行段落拆成多条消息 |
 | `DEEPSEEK_REPLY_INTERVAL` | `float` | `1.0` | 多条消息之间的基础间隔（秒） |
 | `DEEPSEEK_REPLY_INTERVAL_JITTER` | `float` | `0.3` | 间隔随机抖动范围（±秒），设为 0 则使用固定间隔 |
 | `DEEPSEEK_REPLY_MAX_SEGMENTS` | `int` | `4` | 单次最多发送几条消息，超出部分合并到最后一条 |
@@ -115,7 +117,7 @@ DEEPSEEK_REPLY_INTERVAL=1.0
 
 3. 继续发送消息即可进行多轮对话；对话会实时写入本地 SQLite，重启后自动加载。
 
-插件会自动在系统提示词后追加输出约束：模型只输出纯文本，并用 `|||` 把回复拆成多条短消息。发送前还会移除残留的 Markdown 标记，并按照配置的间隔逐条发送，模拟真人分条聊天的节奏。可以通过 `DEEPSEEK_SPLIT_DELIMITER` 更换分隔符，或把 `DEEPSEEK_REPLY_INTERVAL` 设为 `0` 关闭间隔。
+插件会自动在系统提示词后追加输出约束：模型只输出纯文本，优先分成多条短消息，每条像真人聊天，一句话不要太长、句末可以不带标点，并尽量用 `|||` 分隔。如果模型没有输出分隔符，会按空行段落拆分（`DEEPSEEK_SPLIT_PARAGRAPHS`），再按配置的间隔逐条发送。发送前还会移除残留的 Markdown 标记。可以通过 `DEEPSEEK_SPLIT_DELIMITER` 更换分隔符，或把 `DEEPSEEK_REPLY_INTERVAL` 设为 `0` 关闭间隔。
 
 群聊中发送的消息不会触发本插件；以 `/` 开头的消息会交给命令处理器，不会进入对话。
 
@@ -160,6 +162,14 @@ DEEPSEEK_REPLY_INTERVAL=1.0
 - 未配置 Key、图片错误、API 错误、发送失败等会记录 `replied=false` 及原因。
 
 日志只记录文本长度，不记录用户完整原文。缓存命中取自 DeepSeek 返回的 `prompt_cache_hit_tokens` / `prompt_cache_miss_tokens`（兼容 `prompt_tokens_details.cached_tokens`）。
+
+关于 `cache_hit=0`：
+
+- DeepSeek 的上下文缓存基于**前缀完全匹配**，前缀变化后不会命中；
+- 系统提示词里只保留日期（UTC+8），不再包含分钟级时间，避免每分钟都让前缀失效；
+- 长期记忆、历史摘要更新后，下一次请求的前缀会变化，出现一次未命中是正常的；
+- 完整性判断是较短的独立请求，缓存本身也是“尽力而为”，不保证命中；
+- 新会话、首次请求、跨天第一次请求都可能 `cache_hit=0`。
 
 ## 图片理解
 

@@ -97,6 +97,20 @@ def test_split_reply_splits_long_segment(fmt) -> None:
     assert "".join(messages) == "x" * 25
 
 
+def test_split_reply_by_paragraphs(fmt) -> None:
+    text = "第一段\n\n第二段\n\n第三段"
+    assert fmt.split_reply(text, split_paragraphs=True) == [
+        "第一段",
+        "第二段",
+        "第三段",
+    ]
+
+
+def test_split_reply_paragraphs_are_opt_in(fmt) -> None:
+    text = "第一段\n\n第二段"
+    assert fmt.split_reply(text) == ["第一段\n\n第二段"]
+
+
 def test_split_reply_without_delimiter_or_content(fmt) -> None:
     assert fmt.split_reply("完整一句话", delimiter="|||") == ["完整一句话"]
     assert fmt.split_reply("|||", delimiter="|||") == []

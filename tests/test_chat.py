@@ -214,6 +214,29 @@ async def test_reply_splits_on_delimiter_with_interval(
     assert sleeps == [0.5, 0.5]
 
 
+async def test_reply_splits_paragraphs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from nonebot_plugin_aichat_deepseek import chat as chat_module
+    from nonebot_plugin_aichat_deepseek.config import plugin_config
+
+    fake = FakeClient("第一段\n\n第二段\n\n第三段")
+    monkeypatch.setattr(chat_module, "client", fake)
+    monkeypatch.setattr(plugin_config, "deepseek_reply_interval", 0.0)
+    monkeypatch.setattr(plugin_config, "deepseek_reply_interval_jitter", 0.0)
+    monkeypatch.setattr(plugin_config, "deepseek_split_paragraphs", True)
+    chat_module.store.clear("1:2")
+
+    sent: list[str] = []
+
+    async def send(message: str) -> None:
+        sent.append(message)
+
+    await chat_module.reply("1:2", "你好", send)
+
+    assert sent == ["第一段", "第二段", "第三段"]
+
+
 async def test_reply_removes_markdown(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -397,6 +420,10 @@ def test_system_prompt_contains_output_rules() -> None:
     assert plugin_config.deepseek_split_delimiter in prompt
     assert "纯文本" in prompt
     assert "Markdown" in prompt
+    assert "真人" in prompt
+    assert "一句话不要太长" in prompt
+    assert "句末可以不带标点" in prompt
+    assert "优先分成多条" in prompt
     assert "query_chat_history" in prompt
     assert "save_user_memory" in prompt
     assert "UTC+8" in prompt

@@ -170,10 +170,20 @@ def split_reply(
     delimiter: str = "|||",
     max_segments: int = 4,
     max_length: int = 1000,
+    split_paragraphs: bool = False,
 ) -> list[str]:
     """按分隔符拆分、清理 Markdown，并处理过长消息。"""
     delimiter = delimiter.strip()
-    parts = text.split(delimiter) if delimiter and delimiter in text else [text]
+    if delimiter and delimiter in text:
+        parts = text.split(delimiter)
+    else:
+        parts = [text]
+        if split_paragraphs:
+            paragraphs = [
+                part for part in re.split(r"\n{2,}", text) if part.strip()
+            ]
+            if len(paragraphs) > 1:
+                parts = paragraphs
 
     if max_segments > 0 and len(parts) > max_segments:
         head = parts[: max_segments - 1]

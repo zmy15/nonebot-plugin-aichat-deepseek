@@ -77,6 +77,8 @@ class Config(BaseModel):
 
     # 输出格式：模型用该分隔符把回复拆成多条消息发送
     deepseek_split_delimiter: str = Field(default="|||", min_length=1)
+    # 模型没有输出分隔符时，按空行段落拆成多条消息
+    deepseek_split_paragraphs: bool = True
     # 首次回复前的随机延迟（秒）及抖动范围（±秒）
     deepseek_reply_delay: float = Field(default=1.0, ge=0)
     deepseek_reply_delay_jitter: float = Field(default=0.5, ge=0)

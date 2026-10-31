@@ -198,14 +198,15 @@ def _build_system_prompt(
         "输出要求：\n"
         "1. 只输出纯文本，不要使用任何 Markdown 格式"
         "（标题、加粗、斜体、代码块、引用、列表、表格、链接等）。\n"
-        f"2. 需要分成多条消息时，用 {delimiter} 分隔；"
-        "每条消息简短自然，像真人聊天。\n"
-        "3. 不要在回复中解释或提到分隔符。"
+        "2. 优先分成多条短消息发送，每条都像真人随口聊天："
+        "一句话不要太长，句末可以不带标点，不要写成一大段。\n"
+        f"3. 多条消息之间用 {delimiter} 分隔；"
+        "不要在回复中解释或提到分隔符。\n"
     )
     if plugin_config.deepseek_tools_enabled:
-        now = datetime.now(UTC8).strftime("%Y-%m-%d %H:%M")
+        now = datetime.now(UTC8).strftime("%Y-%m-%d")
         rules += (
-            f"\n4. 当前时间是 {now}（UTC+8）。"
+            f"\n4. 当前日期是 {now}（UTC+8）。"
             "用户询问以前聊过什么、回忆之前的内容时，"
             "调用 query_chat_history 工具查询；"
             "提到“昨天”等相对时间时先换算成日期，不要编造。"
@@ -475,6 +476,7 @@ async def reply(
             delimiter=plugin_config.deepseek_split_delimiter,
             max_segments=plugin_config.deepseek_reply_max_segments,
             max_length=plugin_config.deepseek_reply_max_length,
+            split_paragraphs=plugin_config.deepseek_split_paragraphs,
         )
         if not messages:
             messages = [EMPTY_REPLY_TIP]
