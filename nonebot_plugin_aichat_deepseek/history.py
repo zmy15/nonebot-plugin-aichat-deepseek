@@ -36,6 +36,19 @@ CREATE TABLE IF NOT EXISTS summaries (
     content TEXT NOT NULL,
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+CREATE TABLE IF NOT EXISTS memories (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_key TEXT NOT NULL,
+    category TEXT NOT NULL DEFAULT 'fact',
+    content TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (session_key, content)
+);
+
+CREATE INDEX IF NOT EXISTS idx_memories_session
+    ON memories (session_key, updated_at, id);
 """
 
 
@@ -158,6 +171,87 @@ class ConversationStore:
     def get_summary(self, key: str) -> str:
         return self._summaries.get(key, "")
 
+    def add_memory(
+        self,
+        key: str,
+        content: str,
+        category: str = "fact",
+    ) -> int:
+        """保存一条长期记忆；相同内容会更新分类和时间。"""
+        content = content.strip()
+        if not content:
+            raise ValueError("记忆内容不能为空")
+
+        now = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
+        with self._conn:
+            self._conn.execute(
+                "INSERT INTO memories "
+                "(session_key, category, content, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?) "
+                "ON CONFLICT(session_key, content) DO UPDATE SET "
+                "category = excluded.category, "
+                "updated_at = excluded.updated_at",
+                (key, category, content, now, now),
+            )
+            row = self._conn.execute(
+                "SELECT id FROM memories "
+                "WHERE session_key = ? AND content = ?",
+                (key, content),
+            ).fetchone()
+        return int(row[0]) if row else 0
+
+    def list_memories(self, key: str, limit: int = 20) -> list[dict[str, Any]]:
+        limit = max(1, min(int(limit), 50))
+        rows = self._conn.execute(
+            "SELECT id, category, content FROM memories "
+            "WHERE session_key = ? "
+            "ORDER BY updated_at DESC, id DESC LIMIT ?",
+            (key, limit),
+        ).fetchall()
+        return [
+            {"id": int(memory_id), "category": category, "content": content}
+            for memory_id, category, content in rows
+        ]
+
+    def search_memories(
+        self,
+        key: str,
+        keyword: str | None = None,
+        limit: int = 10,
+    ) -> list[dict[str, Any]]:
+        limit = max(1, min(int(limit), 50))
+        clauses = ["session_key = ?"]
+        params: list[Any] = [key]
+
+        if keyword:
+            escaped = (
+                keyword.replace("\\", "\\\\")
+                .replace("%", "\\%")
+                .replace("_", "\\_")
+            )
+            clauses.append("content LIKE ? ESCAPE '\\'")
+            params.append(f"%{escaped}%")
+
+        params.append(limit)
+        rows = self._conn.execute(
+            "SELECT id, category, content FROM memories "
+            f"WHERE {' AND '.join(clauses)} "
+            "ORDER BY updated_at DESC, id DESC LIMIT ?",
+            params,
+        ).fetchall()
+        return [
+            {"id": int(memory_id), "category": category, "content": content}
+            for memory_id, category, content in rows
+        ]
+
+    def delete_memory(self, key: str, memory_id: int) -> bool:
+        with self._conn:
+            cursor = self._conn.execute(
+                "DELETE FROM memories WHERE id = ? AND session_key = ?",
+                (memory_id, key),
+            )
+        return cursor.rowcount > 0
+
     def needs_compression(self, key: str) -> bool:
         if self._max_turns == 0 or self._trigger_turns == 0:
             return False
@@ -269,6 +363,9 @@ class ConversationStore:
             )
             self._conn.execute(
                 "DELETE FROM summaries WHERE session_key = ?", (key,)
+            )
+            self._conn.execute(
+                "DELETE FROM memories WHERE session_key = ?", (key,)
             )
         self._messages.pop(key, None)
         self._summaries.pop(key, None)

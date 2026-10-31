@@ -30,6 +30,11 @@ class Config(BaseModel):
     deepseek_tools_enabled: bool = True
     deepseek_tool_max_rounds: int = Field(default=3, ge=1)
 
+    # 长期记忆
+    deepseek_memory_enabled: bool = True
+    deepseek_memory_max_items: int = Field(default=20, ge=1, le=50)
+    deepseek_memory_max_chars: int = Field(default=1000, ge=1)
+
     # 生成参数
     deepseek_system_prompt: str = (
         "你是一个乐于助人的 AI 助手，请使用简体中文回答用户的问题。"

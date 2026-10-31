@@ -9,6 +9,7 @@ import asyncio
 import random
 from collections.abc import Awaitable, Callable
 from datetime import datetime
+from typing import Any
 
 from nonebot import get_driver, logger, on_message
 from nonebot.adapters import Event
@@ -20,7 +21,11 @@ from .config import plugin_config
 from .data_source import ChatMessage, DeepSeekClient, DeepSeekError
 from .formatting import split_reply, strip_markdown
 from .history import UTC8, ConversationStore
-from .tools import TOOL_DEFINITIONS, execute_tool
+from .tools import (
+    MEMORY_CATEGORY_LABELS,
+    build_tool_definitions,
+    execute_tool,
+)
 
 Sender = Callable[[str], Awaitable[None]]
 
@@ -93,8 +98,11 @@ def _format_error(exc: DeepSeekError) -> str:
     return f"DeepSeek 请求失败：{detail}"
 
 
-def _build_system_prompt(summary: str = "") -> str:
-    """在用户配置的人设之后追加纯文本、分隔符等输出约束。"""
+def _build_system_prompt(
+    summary: str = "",
+    memories: list[dict[str, Any]] | None = None,
+) -> str:
+    """在用户配置的人设之后追加输出约束、摘要和长期记忆。"""
     persona = plugin_config.deepseek_system_prompt.strip()
     delimiter = plugin_config.deepseek_split_delimiter.strip() or "|||"
     rules = (
@@ -113,18 +121,57 @@ def _build_system_prompt(summary: str = "") -> str:
             "调用 query_chat_history 工具查询；"
             "提到“昨天”等相对时间时先换算成日期，不要编造。"
         )
+
+    if (
+        plugin_config.deepseek_tools_enabled
+        and plugin_config.deepseek_memory_enabled
+    ):
+        rules += (
+            "\n5. 当用户提到长期稳定的个人信息、偏好、习惯、关系或重要事实"
+            "（例如“我叫…”“我喜欢…”“我住在…”“记住…”），"
+            "或明确要求你记住时，必须调用 save_user_memory 保存；"
+            "不要保存一次性、临时的内容。"
+            "\n6. 用户要求忘记某条记忆时调用 delete_user_memory；"
+            "需要查找更早的记忆时调用 search_user_memory。"
+        )
+
     prompt = f"{persona}\n\n{rules}" if persona else rules
     if summary:
         prompt = f"{prompt}\n\n【历史对话摘要】\n{summary}"
+
+    if memories:
+        lines: list[str] = []
+        used_chars = 0
+        for memory in memories:
+            label = MEMORY_CATEGORY_LABELS.get(
+                memory["category"], memory["category"]
+            )
+            line = f"- #{memory['id']} [{label}] {memory['content']}"
+            if used_chars + len(line) + 1 > plugin_config.deepseek_memory_max_chars:
+                break
+            lines.append(line)
+            used_chars += len(line) + 1
+        if lines:
+            prompt = f"{prompt}\n\n【用户长期记忆】\n" + "\n".join(lines)
+
     return prompt
 
 
 def _build_request_messages(session_key: str, text: str) -> list[ChatMessage]:
     messages = store.build_messages(session_key)
     summary = store.get_summary(session_key)
+    memories: list[dict[str, Any]] = []
+    if plugin_config.deepseek_memory_enabled:
+        memories = store.list_memories(
+            session_key,
+            limit=plugin_config.deepseek_memory_max_items,
+        )
     messages.insert(
         0,
-        {"role": "system", "content": _build_system_prompt(summary)},
+        {
+            "role": "system",
+            "content": _build_system_prompt(summary, memories),
+        },
     )
     messages.append({"role": "user", "content": text})
     return messages
@@ -196,7 +243,9 @@ async def _generate_reply_locked(session_key: str, text: str) -> str:
 
         answer = await client.chat_with_tools(
             messages,
-            tools=TOOL_DEFINITIONS,
+            tools=build_tool_definitions(
+                include_memory=plugin_config.deepseek_memory_enabled
+            ),
             tool_runner=run_tool,
             max_tool_rounds=plugin_config.deepseek_tool_max_rounds,
         )

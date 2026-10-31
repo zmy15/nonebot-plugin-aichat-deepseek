@@ -257,6 +257,7 @@ def test_system_prompt_contains_output_rules() -> None:
     assert "纯文本" in prompt
     assert "Markdown" in prompt
     assert "query_chat_history" in prompt
+    assert "save_user_memory" in prompt
     assert "UTC+8" in prompt
 
 
@@ -356,3 +357,40 @@ async def test_reply_tool_can_query_history(
     assert "旧问题" in fake.tool_result
     assert "旧回答" in fake.tool_result
     assert sent == ["我记得一些"]
+
+
+async def test_reply_tool_can_save_memory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from nonebot_plugin_aichat_deepseek import chat as chat_module
+
+    class MemorySavingClient:
+        configured = True
+
+        async def chat_with_tools(
+            self, messages, *, tools, tool_runner, max_tool_rounds
+        ) -> str:
+            await tool_runner(
+                "save_user_memory",
+                '{"content":"喜欢猫","category":"preference"}',
+            )
+            return "记住了"
+
+    monkeypatch.setattr(chat_module, "client", MemorySavingClient())
+    chat_module.store.clear("8:8")
+
+    sent: list[str] = []
+
+    async def send(message: str) -> None:
+        sent.append(message)
+
+    await chat_module.reply("8:8", "我喜欢猫", send)
+
+    memories = chat_module.store.list_memories("8:8")
+    assert len(memories) == 1
+    assert memories[0]["content"] == "喜欢猫"
+
+    messages = chat_module._build_request_messages("8:8", "再聊")
+    assert "【用户长期记忆】" in messages[0]["content"]
+    assert "喜欢猫" in messages[0]["content"]
+    assert sent == ["记住了"]

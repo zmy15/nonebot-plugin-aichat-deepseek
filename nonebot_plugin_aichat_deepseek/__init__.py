@@ -19,6 +19,7 @@ __plugin_meta__ = PluginMetadata(
         "回复会自动去除 Markdown 并按真人节奏分条发送。\n"
         "对话历史保存到本地数据库，默认超过 30 轮自动压缩摘要。\n"
         "模型可调用 query_chat_history 查询历史聊天记录（UTC+8）。\n"
+        "会长期记住用户的信息、偏好等，并在后续对话中自动使用。\n"
         "发送 /ping 可检查插件是否在线。"
     ),
     type="application",
