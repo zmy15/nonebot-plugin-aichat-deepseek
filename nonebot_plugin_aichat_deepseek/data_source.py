@@ -92,6 +92,10 @@ class DeepSeekClient:
         self,
         messages: Sequence[Mapping[str, Any]],
         tools: Sequence[Mapping[str, Any]] | None = None,
+        *,
+        tool_choice: str | None = None,
+        max_tokens: int | None = None,
+        thinking: bool | None = None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "model": self._model,
@@ -99,14 +103,20 @@ class DeepSeekClient:
             "stream": False,
             "temperature": self._temperature,
         }
-        if self._max_tokens is not None:
-            payload["max_tokens"] = self._max_tokens
-        if self._thinking is not None:
+        limit = self._max_tokens if max_tokens is None else max_tokens
+        if limit is not None:
+            payload["max_tokens"] = limit
+        effective_thinking = (
+            self._thinking if thinking is None else thinking
+        )
+        if effective_thinking is not None:
             payload["thinking"] = {
-                "type": "enabled" if self._thinking else "disabled"
+                "type": "enabled" if effective_thinking else "disabled"
             }
         if tools:
             payload["tools"] = list(tools)
+            if tool_choice is not None:
+                payload["tool_choice"] = tool_choice
         return payload
 
     @staticmethod
@@ -164,6 +174,9 @@ class DeepSeekClient:
         messages: Sequence[Mapping[str, Any]],
         *,
         tools: Sequence[Mapping[str, Any]] | None = None,
+        tool_choice: str | None = None,
+        max_tokens: int | None = None,
+        thinking: bool | None = None,
         on_usage: UsageCallback | None = None,
         session_key: str = "",
         phase: str = "chat",
@@ -184,7 +197,13 @@ class DeepSeekClient:
                 "Authorization": f"Bearer {self._api_key}",
                 "Content-Type": "application/json",
             }
-            payload = self._build_payload(messages, tools)
+            payload = self._build_payload(
+                messages,
+                tools,
+                tool_choice=tool_choice,
+                max_tokens=max_tokens,
+                thinking=thinking,
+            )
 
             try:
                 async with httpx.AsyncClient(
@@ -250,13 +269,25 @@ class DeepSeekClient:
         self,
         messages: Sequence[Mapping[str, Any]],
         *,
+        tools: Sequence[Mapping[str, Any]] | None = None,
+        tool_choice: str | None = None,
+        max_tokens: int | None = None,
+        thinking: bool | None = None,
         on_usage: UsageCallback | None = None,
         session_key: str = "",
         phase: str = "chat",
     ) -> str:
-        """发送对话消息并返回模型回复文本。"""
+        """发送对话消息并返回模型回复文本。
+
+        ``tools`` / ``tool_choice`` 主要用于让压缩请求复用上一次请求的
+        工具定义，同时用 ``tool_choice="none"`` 禁止模型真的调用工具。
+        """
         data = await self._request(
             messages,
+            tools=tools,
+            tool_choice=tool_choice,
+            max_tokens=max_tokens,
+            thinking=thinking,
             on_usage=on_usage,
             session_key=session_key,
             phase=phase,

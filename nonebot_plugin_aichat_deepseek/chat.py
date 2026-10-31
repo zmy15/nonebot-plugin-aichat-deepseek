@@ -1,6 +1,8 @@
-"""私聊对话逻辑。
+"""私聊/群聊的响应规则、回复发送和 OneBot 事件入口。
 
-只处理私聊消息，不需要任何命令前缀；群里发送的消息不会触发。
+system 提示词、上下文拼装、上下文压缩和模型调用分别放在
+``prompts`` / ``context`` / ``compression`` / ``replies`` 中，
+本模块只保留运行时依赖、发送逻辑和事件处理。
 """
 
 from __future__ import annotations
@@ -10,11 +12,10 @@ import random
 import re
 import time
 import uuid
-from collections.abc import Awaitable, Callable, Mapping, Sequence
-from datetime import datetime
+from collections.abc import Mapping, Sequence
 from typing import Any
 
-from nonebot import get_driver, logger, on_command, on_message, on_notice
+from nonebot import logger, on_command, on_message, on_notice
 from nonebot.adapters import Event
 from nonebot.adapters.onebot.v11 import (
     Bot,
@@ -26,55 +27,50 @@ from nonebot.matcher import Matcher
 from nonebot.rule import Rule
 
 from .aggregator import MessageAggregator
+from .compression import (
+    _GROUP_LAST_HISTORY_COUNT,
+    _GROUP_LAST_PROMPT_TOKENS,
+    _GROUP_LAST_SYSTEM,
+    _GROUP_LAST_TOOLS,
+    compress_group_if_needed as _compress_group_if_needed,
+    compress_if_needed as _compress_if_needed,
+)
 from .config import plugin_config
-from .data_source import ChatMessage, DeepSeekClient, DeepSeekError
-from .formatting import split_reply, strip_markdown
-from .history import (
-    STICKER_LIBRARY_KEY,
-    UTC8,
-    ConversationStore,
+from .constants import (
+    COMPLETENESS_SYSTEM_PROMPT,
+    EMPTY_REPLY_TIP,
+    IMAGE_DISABLED_TIP,
+    MISSING_API_KEY_TIP,
+    POKE_BACK_PROMPT,
+    POKE_PROMPT,
+    Sender,
 )
+from .context import (
+    _build_group_request_messages as _context_build_group_request_messages,
+    _build_request_messages as _context_build_request_messages,
+)
+from .data_source import DeepSeekClient, DeepSeekError
+from .formatting import split_reply
+from .history import STICKER_LIBRARY_KEY, ConversationStore
 from .images import ImageError, fetch_image
-from .scheduled_tasks import (
-    cancel_followup,
-    get_scheduler,
-    schedule_followup,
+from .prompts import _build_system_prompt
+from .replies import generate_group_reply, generate_private_reply
+from .scheduled_tasks import cancel_followup, get_scheduler, schedule_followup
+from .stickers import is_sticker_image, save_sticker_payload
+from .timing import (
+    _looks_like_question,
+    _starts_with_command,
+    next_initial_delay,
+    next_reply_interval,
 )
-from .stickers import (
-    build_sticker_prompt_note,
-    is_sticker_image,
-    save_sticker_payload,
-)
-from .tools import (
-    MEMORY_CATEGORY_LABELS,
-    build_group_tool_definitions,
-    build_tool_definitions,
-    execute_tool,
+from .usage import (
+    _format_error,
+    _log_api_usage,
+    _log_reply,
+    _merge_usage,
+    _usage_numbers,
 )
 
-Sender = Callable[[str], Awaitable[None]]
-
-MISSING_API_KEY_TIP = "还没有配置 DEEPSEEK_API_KEY，请先在 .env 中填写后再试。"
-IMAGE_DISABLED_TIP = "图片理解功能还没有开启。"
-EMPTY_REPLY_TIP = "……"
-POKE_PROMPT = "（对方戳了你一下，请用一句简短自然的话回应）"
-POKE_BACK_PROMPT = (
-    "（对方戳了你一下，请用一句简短自然的话回应；"
-    "也可以调用 poke_user 戳回去。）"
-)
-COMPLETENESS_SYSTEM_PROMPT = (
-    "你是一个消息完整性判断器。用户可能把同一句话拆成多条发送。\n"
-    "下面会给出最近对话和当前拼接后的用户消息。"
-    "请结合上下文判断当前消息是否已经表达完整、可以正常回答。\n"
-    "如果明显还没说完，例如只有开场白、句子中断、以“然后/因为/我想问”等结尾，"
-    "只输出 INCOMPLETE。\n"
-    "否则只输出 COMPLETE。\n"
-    "不要回答用户的问题，不要解释。"
-)
-SUMMARY_SYSTEM_PROMPT = (
-    "你是一个对话摘要助手。请把用户与 AI 的对话压缩成一段简洁的中文摘要，"
-    "保留关键事实、用户偏好、约定和未完成事项；不要编造，不要使用 Markdown。"
-)
 
 client = DeepSeekClient(
     api_key=plugin_config.deepseek_api_key,
@@ -196,135 +192,6 @@ def _should_group_reply(session_key: str) -> bool:
     return random.random() < probability
 
 
-def _starts_with_command(text: str) -> bool:
-    """以命令前缀开头的消息交给命令响应器，避免和 /ping 等命令冲突。"""
-    command_start = get_driver().config.command_start or set()
-    return any(prefix and text.startswith(prefix) for prefix in command_start)
-
-
-def next_reply_interval() -> float:
-    """计算两条消息之间的等待秒数，带随机抖动，避免机械感。"""
-    interval = plugin_config.deepseek_reply_interval
-    jitter = plugin_config.deepseek_reply_interval_jitter
-    if interval <= 0 and jitter <= 0:
-        return 0.0
-    return max(0.0, interval + random.uniform(-jitter, jitter))
-
-
-def next_initial_delay() -> float:
-    """首次回复前的随机延迟，模拟真人看到消息后停顿一下。"""
-    delay = plugin_config.deepseek_reply_delay
-    jitter = plugin_config.deepseek_reply_delay_jitter
-    if delay <= 0 and jitter <= 0:
-        return 0.0
-    return max(0.0, delay + random.uniform(-jitter, jitter))
-
-
-def _usage_numbers(usage: Mapping[str, Any]) -> tuple[int, int, int, int]:
-    """返回 cache_hit / cache_miss / prompt_tokens / completion_tokens。"""
-    prompt_tokens = int(usage.get("prompt_tokens") or 0)
-    details = usage.get("prompt_tokens_details")
-    cached = details.get("cached_tokens") if isinstance(details, dict) else None
-
-    cache_hit = usage.get("prompt_cache_hit_tokens", cached)
-    cache_hit = int(cache_hit or 0)
-    cache_miss = usage.get("prompt_cache_miss_tokens")
-    cache_miss = (
-        int(cache_miss)
-        if cache_miss is not None
-        else max(0, prompt_tokens - cache_hit)
-    )
-    completion_tokens = int(usage.get("completion_tokens") or 0)
-    return cache_hit, cache_miss, prompt_tokens, completion_tokens
-
-
-def _merge_usage(total: dict[str, int], usage: Mapping[str, Any]) -> None:
-    cache_hit, cache_miss, prompt_tokens, completion_tokens = _usage_numbers(
-        usage
-    )
-    total["calls"] = total.get("calls", 0) + 1
-    total["cache_hit"] = total.get("cache_hit", 0) + cache_hit
-    total["cache_miss"] = total.get("cache_miss", 0) + cache_miss
-    total["prompt_tokens"] = total.get("prompt_tokens", 0) + prompt_tokens
-    total["completion_tokens"] = (
-        total.get("completion_tokens", 0) + completion_tokens
-    )
-
-
-def _log_api_usage(
-    session_key: str,
-    phase: str,
-    usage: Mapping[str, Any],
-) -> None:
-    cache_hit, cache_miss, prompt_tokens, completion_tokens = _usage_numbers(
-        usage
-    )
-    logger.info(
-        f"[deepseek] session={session_key} phase={phase} "
-        f"cache_hit={cache_hit} cache_miss={cache_miss} "
-        f"prompt_tokens={prompt_tokens} "
-        f"completion_tokens={completion_tokens}"
-    )
-
-
-def _log_reply(
-    qid: str,
-    session_key: str,
-    replied: bool,
-    reason: str,
-    usage: dict[str, int],
-    segments: int = 0,
-) -> None:
-    logger.info(
-        f"[chat] reply qid={qid} session={session_key} "
-        f"replied={str(replied).lower()} reason={reason} "
-        f"segments={segments} api_calls={usage.get('calls', 0)} "
-        f"cache_hit={usage.get('cache_hit', 0)} "
-        f"cache_miss={usage.get('cache_miss', 0)} "
-        f"prompt_tokens={usage.get('prompt_tokens', 0)} "
-        f"completion_tokens={usage.get('completion_tokens', 0)}"
-    )
-
-
-def _format_error(exc: DeepSeekError) -> str:
-    if exc.status_code == 401:
-        return "DeepSeek API Key 无效，请检查 DEEPSEEK_API_KEY。"
-    if exc.status_code == 402:
-        return "DeepSeek 账户余额不足，请充值后再试。"
-    if exc.status_code == 429:
-        return "请求太频繁了，请稍后再试。"
-    if exc.status_code is not None and exc.status_code >= 500:
-        return "DeepSeek 服务暂时不可用，请稍后再试。"
-
-    detail = exc.message.strip()
-    if len(detail) > 200:
-        detail = f"{detail[:200]}…"
-    return f"DeepSeek 请求失败：{detail}"
-
-
-_QUESTION_MARKERS = (
-    "怎么样",
-    "好不好",
-    "要不要",
-    "是不是",
-    "有没有",
-    "在吗",
-    "忙吗",
-    "吃了吗",
-)
-
-
-def _looks_like_question(text: str) -> bool:
-    text = text.strip()
-    if not text:
-        return False
-    if "?" in text or "？" in text:
-        return True
-    if text.endswith(("吗", "呢", "嘛", "么")):
-        return True
-    return any(marker in text for marker in _QUESTION_MARKERS)
-
-
 def _cancel_pending_followup(session_key: str) -> None:
     cancel_followup(get_scheduler(), session_key)
 
@@ -370,210 +237,6 @@ def _maybe_schedule_followup(session_key: str, answer: str) -> None:
         logger.exception("安排未回复追问失败")
 
 
-def _memory_lines(memories: list[dict[str, Any]]) -> list[str]:
-    lines: list[str] = []
-    used_chars = 0
-    for memory in memories:
-        label = MEMORY_CATEGORY_LABELS.get(
-            memory["category"], memory["category"]
-        )
-        line = f"- #{memory['id']} [{label}] {memory['content']}"
-        max_chars = plugin_config.deepseek_memory_max_chars
-        if used_chars + len(line) + 1 > max_chars:
-            break
-        lines.append(line)
-        used_chars += len(line) + 1
-    return lines
-
-
-def _build_system_prompt(
-    summary: str = "",
-    memories: list[dict[str, Any]] | None = None,
-    user_prompt: str = "",
-    *,
-    group: bool = False,
-) -> str:
-    """在用户配置的人设之后追加输出约束、自定义指令、摘要和长期记忆。"""
-    persona = plugin_config.deepseek_system_prompt.strip()
-    delimiter = plugin_config.deepseek_split_delimiter.strip() or "|||"
-    rules = (
-        "输出要求：\n"
-        "1. 只输出纯文本，不要使用任何 Markdown 格式"
-        "（标题、加粗、斜体、代码块、引用、列表、表格、链接等）。\n"
-        "2. 优先分成多条短消息发送，每条都像真人随口聊天："
-        "一句话不要太长，句末可以不带标点，不要写成一大段。\n"
-        f"3. 多条消息之间用 {delimiter} 分隔；"
-        "不要在回复中解释或提到分隔符。\n"
-    )
-    if group:
-        today = datetime.now(UTC8).strftime("%Y-%m-%d")
-        rules += (
-            f"\n群聊规则：当前日期是 {today}（UTC+8）。"
-            "你会看到“昵称(QQ)：内容”格式的群消息；"
-            "像群成员一样自然地参与聊天，不要复述所有人的话，"
-            "不要假装知道未提供的信息；需要称呼某人时直接写昵称。"
-        )
-        if (
-            plugin_config.deepseek_tools_enabled
-            and plugin_config.deepseek_memory_enabled
-        ):
-            rules += (
-                "\n群聊记忆：当前发言人的个人信息用 save_user_memory 保存，"
-                "整个群共享的信息用 save_group_memory 保存；"
-                "需要回忆时用 search_user_memory 或 search_group_memory；"
-                "删除时用 delete_user_memory 或 delete_group_memory。"
-                "不要把单个成员的私人信息写进群聊记忆。"
-            )
-        if (
-            plugin_config.deepseek_tools_enabled
-            and plugin_config.deepseek_search_enabled
-        ):
-            rules += (
-                "\n群里聊到实时信息、新闻、价格、天气或你不确定的内容时，"
-                "可以调用 web_search 查询，不要凭记忆编造。"
-            )
-        if (
-            plugin_config.deepseek_tools_enabled
-            and plugin_config.deepseek_poke_enabled
-        ):
-            rules += (
-                "\n群里可以用 poke_user 戳一戳当前发言人，"
-                "表达提醒、调侃或互动；不要连续频繁戳同一个人。"
-            )
-        if (
-            plugin_config.deepseek_tools_enabled
-            and plugin_config.deepseek_sticker_enabled
-        ):
-            rules += (
-                "\n所有私聊和群聊共用同一个表情库，不按用户或群隔离。"
-                "本轮收到表情包时，消息里会给出表情包 ID；"
-                "如果用户说明了含义，调用 describe_sticker 记录，"
-                "没有说明就不要凭空猜测。聊天中可以根据气氛主动调用 "
-                "send_sticker 发送合适的表情包；不确定有哪些可选时，"
-                "先调用 search_stickers 查看。"
-            )
-        prompt = f"{persona}\n\n{rules}" if persona else rules
-        if summary:
-            prompt = f"{prompt}\n\n【历史对话摘要】\n{summary}"
-        return prompt
-
-    if plugin_config.deepseek_tools_enabled:
-        now = datetime.now(UTC8).strftime("%Y-%m-%d")
-        rules += (
-            f"\n4. 当前日期是 {now}（UTC+8）。"
-            "用户询问以前聊过什么、回忆之前的内容时，"
-            "调用 query_chat_history 工具查询；"
-            "提到“昨天”等相对时间时先换算成日期，不要编造。"
-        )
-
-    if (
-        plugin_config.deepseek_tools_enabled
-        and plugin_config.deepseek_memory_enabled
-    ):
-        rules += (
-            "\n5. 当用户提到长期稳定的个人信息、偏好、习惯、关系或重要事实"
-            "（例如“我叫…”“我喜欢…”“我住在…”“记住…”），"
-            "或明确要求你记住时，必须调用 save_user_memory 保存；"
-            "不要保存一次性、临时的内容。"
-            "\n6. 用户要求忘记某条记忆时调用 delete_user_memory；"
-            "需要查找更早的记忆时调用 search_user_memory。"
-        )
-
-    if (
-        plugin_config.deepseek_tools_enabled
-        and plugin_config.deepseek_search_enabled
-    ):
-        rules += (
-            "\n当用户询问实时信息、新闻、价格、天气、最近发生的事件，"
-            "或你不确定、需要最新资料时，调用 web_search 搜索网页；"
-            "不要凭记忆编造实时信息。"
-        )
-
-    if (
-        plugin_config.deepseek_tools_enabled
-        and plugin_config.deepseek_scheduler_enabled
-    ):
-        rules += (
-            "\n每次回复时都主动判断：是否适合在稍后找用户聊天或戳一戳，"
-            "不需要用户提出“定时”或“提醒我”的要求。"
-            "例如用户说要去忙、吃饭、睡觉、出门，"
-            "或聊天告一段落时，可以调用 schedule_task "
-            "安排稍后关心或问候；"
-            "不要每次对话都安排，也不要连续安排多个。"
-            "到点后由你根据上下文、人设和记忆主动生成消息，"
-            "不是发送固定文本。只作用于当前私聊用户，"
-            "不要编造任务已创建，任务保存在内存中，"
-            "机器人重启后会丢失。"
-            "用户要查看、取消或修改定时任务时，分别调用 "
-            "list_scheduled_tasks、cancel_scheduled_task、"
-            "update_scheduled_task；只能操作当前用户自己的任务。"
-        )
-
-    if (
-        plugin_config.deepseek_tools_enabled
-        and plugin_config.deepseek_scheduler_enabled
-        and plugin_config.deepseek_followup_enabled
-    ):
-        rules += (
-            "\n当你向用户提问后，如果用户一段时间没有回复，"
-            "插件会自动让你再补一句；追问由插件自动处理，"
-            "不需要你调用 schedule_task 另外安排。"
-        )
-
-    if (
-        plugin_config.deepseek_tools_enabled
-        and plugin_config.deepseek_custom_prompt_enabled
-    ):
-        rules += (
-            "\n用户明确要求改变人设、语气、回复风格或记住专属设定时，"
-            "调用 set_user_system_prompt 保存；"
-            "询问当前设定时调用 get_user_system_prompt；"
-            "要求恢复默认时调用 clear_user_system_prompt。"
-        )
-
-    if (
-        plugin_config.deepseek_tools_enabled
-        and plugin_config.deepseek_poke_enabled
-    ):
-        rules += (
-            "\n用户要求你戳一戳、提醒或互动时，调用 poke_user；"
-            "不要等用户开口，聊天气氛合适时主动戳一戳；"
-            "用户戳你时，也可以戳回去。"
-        )
-
-    if (
-        plugin_config.deepseek_tools_enabled
-        and plugin_config.deepseek_sticker_enabled
-    ):
-        rules += (
-            "\n用户发送表情包时，插件会把它存入表情库并在消息中给出"
-            "表情包 ID。如果你能根据图片判断它表达的情绪或含义，"
-            "调用 describe_sticker 记录一两个词的简短含义；"
-            "用户说明了含义时以用户说明为准。"
-            "不要等用户明确要求，聊天中可以根据情绪主动调用 "
-            "send_sticker 发送合适的表情包，"
-            "把表情包当成日常表达方式之一；"
-            "不确定有哪些表情可选时，先调用 search_stickers 查看。"
-        )
-
-    prompt = f"{persona}\n\n{rules}" if persona else rules
-    custom = user_prompt.strip()
-    if plugin_config.deepseek_custom_prompt_enabled and custom:
-        prompt = (
-            f"{prompt}\n\n【用户自定义指令】\n{custom}\n"
-            "请在不违反上面的输出格式要求的前提下优先遵守这些指令。"
-        )
-    if summary:
-        prompt = f"{prompt}\n\n【历史对话摘要】\n{summary}"
-
-    if memories:
-        lines = _memory_lines(memories)
-        if lines:
-            prompt = f"{prompt}\n\n【用户长期记忆】\n" + "\n".join(lines)
-
-    return prompt
-
-
 def _build_request_messages(
     session_key: str,
     user_content: str | list[dict[str, Any]],
@@ -581,38 +244,14 @@ def _build_request_messages(
     group: bool = False,
     history_limit: int | None = None,
 ) -> list[dict[str, Any]]:
-    messages: list[dict[str, Any]] = [
-        dict(message)
-        for message in store.build_messages(
-            session_key, limit=history_limit
-        )
-    ]
-    summary = store.get_summary(session_key)
-    memories: list[dict[str, Any]] = []
-    if plugin_config.deepseek_memory_enabled and not group:
-        memories = store.list_memories(
-            session_key,
-            limit=plugin_config.deepseek_memory_max_items,
-        )
-    user_prompt = (
-        store.get_user_prompt(session_key)
-        if plugin_config.deepseek_custom_prompt_enabled and not group
-        else ""
+    """兼容入口：使用当前 store 拼装私聊请求。"""
+    return _context_build_request_messages(
+        store,
+        session_key,
+        user_content,
+        group=group,
+        history_limit=history_limit,
     )
-    messages.insert(
-        0,
-        {
-            "role": "system",
-            "content": _build_system_prompt(
-                summary,
-                memories,
-                user_prompt,
-                group=group,
-            ),
-        },
-    )
-    messages.append({"role": "user", "content": user_content})
-    return messages
 
 
 def _build_group_request_messages(
@@ -620,108 +259,33 @@ def _build_group_request_messages(
     group_id: int,
     sender_id: int,
     sender_name: str,
-    history_limit: int,
+    history_limit: int | None = None,
 ) -> list[dict[str, Any]]:
-    messages: list[dict[str, Any]] = [
-        dict(message)
-        for message in store.build_group_messages(
-            bot_id,
-            group_id,
-            limit=history_limit,
-        )
-    ]
-    system = _build_system_prompt(group=True)
-
-    if plugin_config.deepseek_memory_enabled:
-        group_memories = store.list_group_memories(
-            bot_id,
-            group_id,
-            "group",
-            limit=plugin_config.deepseek_memory_max_items,
-        )
-        group_lines = _memory_lines(group_memories)
-        if group_lines:
-            system = (
-                f"{system}\n\n【群聊记忆】\n" + "\n".join(group_lines)
-            )
-
-        member_memories = store.list_group_memories(
-            bot_id,
-            group_id,
-            "member",
-            user_id=sender_id,
-            limit=plugin_config.deepseek_memory_max_items,
-        )
-        member_lines = _memory_lines(member_memories)
-        if member_lines:
-            label = f"{sender_name}({sender_id})"
-            system = (
-                f"{system}\n\n【当前成员记忆：{label}】\n"
-                + "\n".join(member_lines)
-            )
-
-    return [{"role": "system", "content": system}, *messages]
-
-
-def _build_summary_messages(
-    previous_summary: str, batch: list[ChatMessage]
-) -> list[ChatMessage]:
-    lines: list[str] = []
-    if previous_summary:
-        lines.extend(["【已有摘要】", previous_summary, ""])
-
-    lines.append("【待压缩对话】")
-    for message in batch:
-        speaker = "用户" if message["role"] == "user" else "AI"
-        lines.append(f"{speaker}：{message['content']}")
-
-    lines.extend(["", "请输出更新后的摘要正文，300 字以内，不要输出其它内容。"])
-    return [
-        {"role": "system", "content": SUMMARY_SYSTEM_PROMPT},
-        {"role": "user", "content": "\n".join(lines)},
-    ]
+    """兼容入口：使用当前 store 拼装群聊请求。"""
+    return _context_build_group_request_messages(
+        store,
+        bot_id,
+        group_id,
+        sender_id,
+        sender_name,
+        history_limit,
+    )
 
 
 async def compress_if_needed(session_key: str) -> None:
-    """未压缩消息超过阈值时，把最早一批消息压缩进滚动摘要。"""
-    if not store.needs_compression(session_key):
-        return
+    """兼容入口：使用当前 client/store 压缩私聊上下文。"""
+    await _compress_if_needed(client, store, session_key)
 
-    batch = store.get_compression_batch(session_key)
-    if not batch:
-        return
 
-    previous_summary = store.get_summary(session_key)
-    try:
-        summary = await client.chat(
-            _build_summary_messages(previous_summary, batch),
-            on_usage=lambda usage: _log_api_usage(
-                session_key, "compression", usage
-            ),
-            session_key=session_key,
-            phase="compression",
-        )
-    except DeepSeekError as exc:
-        logger.warning(
-            f"上下文压缩失败（status={exc.status_code}）：{exc.message}"
-        )
-        return
-    except Exception:
-        logger.exception("上下文压缩出现未预期异常")
-        return
-
-    summary = strip_markdown(summary).strip()
-    delimiter = plugin_config.deepseek_split_delimiter.strip()
-    if delimiter:
-        summary = summary.replace(delimiter, " ").strip()
-    if not summary:
-        logger.warning("上下文压缩返回空摘要，本次跳过")
-        return
-    if len(summary) > 1000:
-        summary = summary[:1000]
-
-    store.apply_compression(session_key, len(batch), summary)
-    logger.info(f"已压缩 {len(batch)} 条历史消息：{session_key}")
+async def compress_group_if_needed(
+    bot_id: int,
+    group_id: int,
+    session_key: str,
+) -> bool:
+    """兼容入口：使用当前 client/store 压缩群聊上下文。"""
+    return await _compress_group_if_needed(
+        client, store, bot_id, group_id, session_key
+    )
 
 
 async def _generate_reply_locked(
@@ -734,145 +298,20 @@ async def _generate_reply_locked(
     group: bool = False,
     history_limit: int | None = None,
 ) -> str:
-    usage_total = usage if usage is not None else {}
-
-    def record_usage(usage_data: Mapping[str, Any]) -> None:
-        _merge_usage(usage_total, usage_data)
-        _log_api_usage(session_key, "reply", usage_data)
-
-    history_text = text
-
-    if images:
-        if len(images) > plugin_config.deepseek_image_max_count:
-            raise ImageError(
-                f"一次最多发送 {plugin_config.deepseek_image_max_count} 张图片"
-            )
-
-        payloads = []
-        for segment in images:
-            payloads.append(
-                await fetch_image(
-                    segment,
-                    timeout=plugin_config.deepseek_image_timeout,
-                    max_bytes=plugin_config.deepseek_image_max_bytes,
-                )
-            )
-
-        sticker_records: list[dict[str, Any]] = []
-        if plugin_config.deepseek_sticker_enabled:
-            for segment, payload in zip(images, payloads):
-                if (
-                    len(sticker_records)
-                    >= plugin_config.deepseek_sticker_max_count
-                ):
-                    break
-                if not is_sticker_image(segment, text):
-                    continue
-                try:
-                    sticker_records.append(
-                        save_sticker_payload(
-                            store, STICKER_LIBRARY_KEY, payload
-                        )
-                    )
-                except Exception:
-                    logger.exception("保存表情包失败，跳过本次收藏")
-
-        file_ids = []
-        for payload in payloads:
-            file_ids.append(
-                await client.upload_image(
-                    payload.data,
-                    payload.filename,
-                    payload.content_type,
-                    session_key=session_key,
-                )
-            )
-
-        prompt = text or (
-            "请描述这张图片。" if len(payloads) == 1 else "请描述这些图片。"
-        )
-        sticker_note = (
-            build_sticker_prompt_note(sticker_records)
-            if plugin_config.deepseek_tools_enabled
-            else ""
-        )
-        if sticker_note:
-            prompt = f"{prompt}\n{sticker_note}"
-
-        user_content: list[dict[str, Any]] = [
-            {"type": "text", "text": prompt}
-        ]
-        user_content.extend(
-            {"type": "file", "file_id": file_id} for file_id in file_ids
-        )
-        messages = _build_request_messages(
-            session_key,
-            user_content,
-            group=group,
-            history_limit=history_limit,
-        )
-
-        image_count = len(payloads) - len(sticker_records)
-        markers: list[str] = []
-        if image_count:
-            markers.append(f"（用户发送了 {image_count} 张图片）")
-        if sticker_records:
-            markers.append(
-                f"（用户发送了 {len(sticker_records)} 个表情包）"
-            )
-        marker = "".join(markers)
-        history_text = f"{text}\n{marker}".strip() if text else marker
-    else:
-        messages = _build_request_messages(
-            session_key,
-            text,
-            group=group,
-            history_limit=history_limit,
-        )
-
-    if history_user_text is not None:
-        history_text = history_user_text
-
-    if plugin_config.deepseek_tools_enabled and not group:
-
-        async def run_tool(name: str, arguments: str) -> str:
-            return await execute_tool(
-                name,
-                arguments,
-                session_key,
-                store,
-                search_web=getattr(client, "search", None),
-                get_scheduler=get_scheduler,
-            )
-
-        answer = await client.chat_with_tools(
-            messages,
-            tools=build_tool_definitions(
-                include_memory=plugin_config.deepseek_memory_enabled,
-                include_custom_prompt=(
-                    plugin_config.deepseek_custom_prompt_enabled
-                ),
-                include_poke=plugin_config.deepseek_poke_enabled,
-                include_stickers=plugin_config.deepseek_sticker_enabled,
-                include_search=plugin_config.deepseek_search_enabled,
-                include_scheduler=plugin_config.deepseek_scheduler_enabled,
-            ),
-            tool_runner=run_tool,
-            max_tool_rounds=plugin_config.deepseek_tool_max_rounds,
-            on_usage=record_usage,
-            session_key=session_key,
-            phase="reply",
-        )
-    else:
-        answer = await client.chat(
-            messages,
-            on_usage=record_usage,
-            session_key=session_key,
-            phase="reply",
-        )
-
-    store.add_turn(session_key, history_text, answer)
-    return answer
+    """兼容入口：注入当前运行时依赖后生成私聊回复。"""
+    return await generate_private_reply(
+        client,
+        store,
+        fetch_image,
+        get_scheduler,
+        session_key,
+        text,
+        images,
+        usage,
+        history_user_text,
+        group=group,
+        history_limit=history_limit,
+    )
 
 
 async def _generate_group_reply_locked(
@@ -883,58 +322,18 @@ async def _generate_group_reply_locked(
     session_key: str,
     usage: dict[str, int] | None = None,
 ) -> str:
-    usage_total = usage if usage is not None else {}
-
-    def record_usage(usage_data: Mapping[str, Any]) -> None:
-        _merge_usage(usage_total, usage_data)
-        _log_api_usage(session_key, "group_reply", usage_data)
-
-    messages = _build_group_request_messages(
+    """兼容入口：注入当前运行时依赖后生成群聊回复。"""
+    return await generate_group_reply(
+        client,
+        store,
+        get_scheduler,
         bot_id,
         group_id,
         sender_id,
         sender_name,
-        plugin_config.deepseek_group_history_messages,
+        session_key,
+        usage,
     )
-
-    group_tools = build_group_tool_definitions()
-    if plugin_config.deepseek_tools_enabled and group_tools:
-
-        async def run_tool(name: str, arguments: str) -> str:
-            return await execute_tool(
-                name,
-                arguments,
-                session_key,
-                store,
-                search_web=getattr(client, "search", None),
-                get_scheduler=get_scheduler,
-                chat_type="group",
-                bot_id=bot_id,
-                group_id=group_id,
-                sender_id=sender_id,
-                sender_name=sender_name,
-            )
-
-        answer = await client.chat_with_tools(
-            messages,
-            tools=group_tools,
-            tool_runner=run_tool,
-            max_tool_rounds=plugin_config.deepseek_tool_max_rounds,
-            on_usage=record_usage,
-            session_key=session_key,
-            phase="group_reply",
-        )
-    else:
-        answer = await client.chat(
-            messages,
-            on_usage=record_usage,
-            session_key=session_key,
-            phase="group_reply",
-        )
-
-    store.add_group_message(bot_id, group_id, "assistant", answer)
-    return answer
-
 
 async def generate_reply(
     session_key: str,
@@ -1085,7 +484,15 @@ async def reply(
         if allow_followup and not group:
             _maybe_schedule_followup(session_key, answer)
 
-        if not group:
+        if group:
+            if bot_id is not None and group_id is not None:
+                try:
+                    await compress_group_if_needed(
+                        bot_id, group_id, session_key
+                    )
+                except Exception:
+                    logger.exception("群聊上下文压缩处理失败")
+        else:
             try:
                 await compress_if_needed(session_key)
             except Exception:

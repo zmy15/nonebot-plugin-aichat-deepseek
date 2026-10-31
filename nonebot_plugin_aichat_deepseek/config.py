@@ -34,7 +34,25 @@ class Config(BaseModel):
         default=0.05, ge=0, le=1
     )
     deepseek_group_reply_cooldown: float = Field(default=60.0, ge=0)
+    # 群聊上下文：关闭压缩时才按这个条数截取最近消息
     deepseek_group_history_messages: int = Field(default=50, ge=1)
+
+    # 群聊上下文压缩：默认每积累 200 条消息压缩一次；
+    # 估算 token 超过 900k 时也会触发压缩；压缩结果不超过 10k token。
+    deepseek_group_compression_enabled: bool = True
+    deepseek_group_compression_batch_messages: int = Field(
+        default=200, ge=1
+    )
+    deepseek_group_compression_trigger_tokens: int = Field(
+        default=900_000, ge=1
+    )
+    deepseek_group_compression_summary_max_tokens: int = Field(
+        default=10_000, ge=1
+    )
+    # 二级压缩时至少合并多少段旧摘要（不足时合并全部）
+    deepseek_group_compression_merge_summaries: int = Field(
+        default=4, ge=2
+    )
 
     # 工具调用
     deepseek_tools_enabled: bool = True

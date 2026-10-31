@@ -86,11 +86,25 @@ CREATE TABLE IF NOT EXISTS group_messages (
     sender_name TEXT NOT NULL DEFAULT '',
     role TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
     content TEXT NOT NULL,
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    compressed INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_group_messages
     ON group_messages (bot_id, group_id, id);
+
+CREATE TABLE IF NOT EXISTS group_summaries (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    bot_id INTEGER NOT NULL,
+    group_id INTEGER NOT NULL,
+    content TEXT NOT NULL,
+    token_count INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_group_summaries
+    ON group_summaries (bot_id, group_id, id);
 
 CREATE TABLE IF NOT EXISTS group_memories (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -162,7 +176,29 @@ class ConversationStore:
     def _init_schema(self) -> None:
         with self._conn:
             self._conn.executescript(_SCHEMA)
+        self._migrate_group_messages_compressed()
+        with self._conn:
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_group_messages_compressed "
+                "ON group_messages (bot_id, group_id, compressed, id)"
+            )
         self._migrate_stickers_to_global()
+
+    def _migrate_group_messages_compressed(self) -> None:
+        """为旧数据库补上 ``group_messages.compressed`` 列。"""
+        columns = {
+            str(row[1])
+            for row in self._conn.execute(
+                "PRAGMA table_info(group_messages)"
+            )
+        }
+        if "compressed" in columns:
+            return
+        with self._conn:
+            self._conn.execute(
+                "ALTER TABLE group_messages ADD COLUMN compressed "
+                "INTEGER NOT NULL DEFAULT 0"
+            )
 
     def _migrate_stickers_to_global(self) -> None:
         """把旧的按用户/群隔离的表情包合并到全局表情库。"""
@@ -377,44 +413,262 @@ class ConversationStore:
             )
         return int(cursor.lastrowid)
 
+    @staticmethod
+    def _format_group_row(
+        role: str,
+        sender_id: int | None,
+        sender_name: str,
+        content: str,
+    ) -> ChatMessage:
+        """把一条群聊消息转换为 API 需要的格式。"""
+        if role == "user":
+            name = sender_name or (
+                str(sender_id) if sender_id is not None else "未知成员"
+            )
+            label = (
+                f"{name}({sender_id})" if sender_id is not None else name
+            )
+            content = f"{label}：{content}"
+        return cast(ChatMessage, {"role": role, "content": content})
+
     def build_group_messages(
         self,
         bot_id: int,
         group_id: int,
-        limit: int = 50,
+        limit: int | None = None,
+        *,
+        oldest: bool = False,
     ) -> list[ChatMessage]:
-        """加载群聊最近消息，并把发送者 QQ/昵称拼进 user 内容。"""
+        """加载群聊未压缩消息。
+
+        默认取最近 ``limit`` 条；``oldest=True`` 时取最早 ``limit`` 条，
+        用于复用上一次请求的完整消息前缀。
+        """
+        if limit is not None and limit <= 0:
+            return []
+
+        order = "ASC" if oldest else "DESC"
+        sql = (
+            "SELECT role, sender_id, sender_name, content "
+            "FROM group_messages "
+            "WHERE bot_id = ? AND group_id = ? AND compressed = 0 "
+            f"ORDER BY id {order}"
+        )
+        params: list[Any] = [bot_id, group_id]
+        if limit is not None:
+            sql += " LIMIT ?"
+            params.append(limit)
+
+        rows = self._conn.execute(sql, params).fetchall()
+        if not oldest:
+            rows = list(reversed(rows))
+        return [
+            self._format_group_row(role, sender_id, sender_name, content)
+            for role, sender_id, sender_name, content in rows
+        ]
+
+    def count_uncompressed_group_messages(
+        self,
+        bot_id: int,
+        group_id: int,
+    ) -> int:
+        row = self._conn.execute(
+            "SELECT COUNT(*) FROM group_messages "
+            "WHERE bot_id = ? AND group_id = ? AND compressed = 0",
+            (bot_id, group_id),
+        ).fetchone()
+        return int(row[0]) if row else 0
+
+    def get_group_compression_batch(
+        self,
+        bot_id: int,
+        group_id: int,
+        limit: int,
+    ) -> list[tuple[int, ChatMessage]]:
+        """返回最旧的一批未压缩群消息，附带数据库 id。"""
         if limit <= 0:
             return []
         rows = self._conn.execute(
-            "SELECT role, sender_id, sender_name, content "
+            "SELECT id, role, sender_id, sender_name, content "
             "FROM group_messages "
-            "WHERE bot_id = ? AND group_id = ? "
-            "ORDER BY id DESC LIMIT ?",
+            "WHERE bot_id = ? AND group_id = ? AND compressed = 0 "
+            "ORDER BY id LIMIT ?",
             (bot_id, group_id, limit),
         ).fetchall()
-
-        messages: list[ChatMessage] = []
-        for role, sender_id, sender_name, content in reversed(rows):
-            if role == "user":
-                name = sender_name or (
-                    str(sender_id) if sender_id is not None else "未知成员"
-                )
-                label = (
-                    f"{name}({sender_id})"
-                    if sender_id is not None
-                    else name
-                )
-                content = f"{label}：{content}"
-            messages.append(
-                cast(ChatMessage, {"role": role, "content": content})
+        return [
+            (
+                int(message_id),
+                self._format_group_row(
+                    role, sender_id, sender_name, content
+                ),
             )
-        return messages
+            for (
+                message_id,
+                role,
+                sender_id,
+                sender_name,
+                content,
+            ) in rows
+        ]
+
+    def mark_group_messages_compressed(
+        self,
+        message_ids: list[int],
+    ) -> int:
+        """把指定群消息标记为已压缩，原始记录保留。"""
+        if not message_ids:
+            return 0
+        placeholders = ", ".join("?" for _ in message_ids)
+        with self._conn:
+            cursor = self._conn.execute(
+                "UPDATE group_messages SET compressed = 1 "
+                f"WHERE id IN ({placeholders})",
+                message_ids,
+            )
+        return cursor.rowcount
+
+    def add_group_summary(
+        self,
+        bot_id: int,
+        group_id: int,
+        content: str,
+        *,
+        token_count: int = 0,
+    ) -> int:
+        """追加一段群聊历史摘要。"""
+        content = content.strip()
+        if not content:
+            raise ValueError("摘要内容不能为空")
+
+        now = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
+        with self._conn:
+            cursor = self._conn.execute(
+                "INSERT INTO group_summaries "
+                "(bot_id, group_id, content, token_count, "
+                "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    bot_id,
+                    group_id,
+                    content,
+                    max(0, int(token_count)),
+                    now,
+                    now,
+                ),
+            )
+        return int(cursor.lastrowid)
+
+    def apply_group_compression(
+        self,
+        bot_id: int,
+        group_id: int,
+        message_ids: list[int],
+        content: str,
+        *,
+        token_count: int = 0,
+    ) -> int:
+        """原子地保存一段摘要并把对应群消息标记为已压缩。"""
+        content = content.strip()
+        if not content:
+            raise ValueError("摘要内容不能为空")
+        if not message_ids:
+            raise ValueError("至少需要一条待压缩消息")
+
+        now = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
+        placeholders = ", ".join("?" for _ in message_ids)
+        with self._conn:
+            cursor = self._conn.execute(
+                "INSERT INTO group_summaries "
+                "(bot_id, group_id, content, token_count, "
+                "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    bot_id,
+                    group_id,
+                    content,
+                    max(0, int(token_count)),
+                    now,
+                    now,
+                ),
+            )
+            self._conn.execute(
+                "UPDATE group_messages SET compressed = 1 "
+                f"WHERE bot_id = ? AND group_id = ? "
+                f"AND id IN ({placeholders})",
+                [bot_id, group_id, *message_ids],
+            )
+        return int(cursor.lastrowid)
+
+    def list_group_summaries(
+        self,
+        bot_id: int,
+        group_id: int,
+    ) -> list[dict[str, Any]]:
+        """按时间顺序返回群聊历史摘要片段。"""
+        rows = self._conn.execute(
+            "SELECT id, content, token_count FROM group_summaries "
+            "WHERE bot_id = ? AND group_id = ? ORDER BY id",
+            (bot_id, group_id),
+        ).fetchall()
+        return [
+            {
+                "id": int(summary_id),
+                "content": content,
+                "token_count": int(token_count),
+            }
+            for summary_id, content, token_count in rows
+        ]
+
+    def merge_group_summaries(
+        self,
+        bot_id: int,
+        group_id: int,
+        summary_ids: list[int],
+        content: str,
+        *,
+        token_count: int = 0,
+    ) -> bool:
+        """用一段新摘要替换多段旧摘要，保留时间顺序。"""
+        ids = list(dict.fromkeys(int(item) for item in summary_ids))
+        if len(ids) < 2:
+            return False
+        content = content.strip()
+        if not content:
+            raise ValueError("摘要内容不能为空")
+
+        now = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
+        with self._conn:
+            cursor = self._conn.execute(
+                "UPDATE group_summaries "
+                "SET content = ?, token_count = ?, updated_at = ? "
+                "WHERE id = ? AND bot_id = ? AND group_id = ?",
+                (
+                    content,
+                    max(0, int(token_count)),
+                    now,
+                    ids[0],
+                    bot_id,
+                    group_id,
+                ),
+            )
+            if cursor.rowcount == 0:
+                return False
+            placeholders = ", ".join("?" for _ in ids[1:])
+            self._conn.execute(
+                "DELETE FROM group_summaries "
+                f"WHERE bot_id = ? AND group_id = ? "
+                f"AND id IN ({placeholders})",
+                [bot_id, group_id, *ids[1:]],
+            )
+        return True
 
     def clear_group_context(self, bot_id: int, group_id: int) -> None:
         with self._conn:
             self._conn.execute(
                 "DELETE FROM group_messages "
+                "WHERE bot_id = ? AND group_id = ?",
+                (bot_id, group_id),
+            )
+            self._conn.execute(
+                "DELETE FROM group_summaries "
                 "WHERE bot_id = ? AND group_id = ?",
                 (bot_id, group_id),
             )

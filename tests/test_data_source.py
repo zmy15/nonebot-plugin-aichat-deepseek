@@ -56,6 +56,37 @@ async def test_chat_success_and_payload(ds) -> None:
     assert "thinking" not in payload
 
 
+async def test_chat_can_replay_tools_with_choice_none(ds) -> None:
+    seen: dict[str, dict] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["payload"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": "摘要"}}]},
+        )
+
+    tools = [{"type": "function", "function": {"name": "web_search"}}]
+    client = make_client(ds.DeepSeekClient, handler)
+
+    assert (
+        await client.chat(
+            MESSAGES,
+            tools=tools,
+            tool_choice="none",
+            max_tokens=10000,
+            thinking=False,
+        )
+        == "摘要"
+    )
+
+    payload = seen["payload"]
+    assert payload["tools"] == tools
+    assert payload["tool_choice"] == "none"
+    assert payload["max_tokens"] == 10000
+    assert payload["thinking"] == {"type": "disabled"}
+
+
 async def test_base_url_trailing_slash(ds) -> None:
     seen: dict[str, httpx.Request] = {}
 

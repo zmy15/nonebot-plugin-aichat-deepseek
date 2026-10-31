@@ -25,6 +25,7 @@
 - 表情包收藏：自动把私聊/群聊收到的表情包存入对应表情库，记录含义和标签
 - 模型可调用工具按含义查询表情包，并通过 OneBot 图片消息发送到私聊或群聊
 - 未压缩消息超过 30 轮时，自动把最早 20 条消息压缩成摘要，放到 system 指令之后
+- 群聊上下文自动压缩：默认每 200 条消息压缩一次，prompt 超过 900k token 时也会触发；摘要不超过 10k token，压缩请求复用上次请求前缀以命中缓存
 - 自动移除 Markdown 标记，只发送纯文本
 - 模型用 `|||` 分隔多条消息，插件按随机间隔逐条发送，更像真人聊天
 - 回复过长时自动分段发送
@@ -60,6 +61,11 @@ DEEPSEEK_GROUP_IDS=
 DEEPSEEK_GROUP_REPLY_PROBABILITY=0.05
 DEEPSEEK_GROUP_REPLY_COOLDOWN=60
 DEEPSEEK_GROUP_HISTORY_MESSAGES=50
+DEEPSEEK_GROUP_COMPRESSION_ENABLED=true
+DEEPSEEK_GROUP_COMPRESSION_BATCH_MESSAGES=200
+DEEPSEEK_GROUP_COMPRESSION_TRIGGER_TOKENS=900000
+DEEPSEEK_GROUP_COMPRESSION_SUMMARY_MAX_TOKENS=10000
+DEEPSEEK_GROUP_COMPRESSION_MERGE_SUMMARIES=4
 DEEPSEEK_TOOLS_ENABLED=true
 DEEPSEEK_TOOL_MAX_ROUNDS=3
 DEEPSEEK_POKE_ENABLED=true
@@ -106,7 +112,12 @@ DEEPSEEK_REPLY_INTERVAL=1.0
 | `DEEPSEEK_GROUP_IDS` | `str` | `""` | 群号白名单；留空表示所有群，填写后只响应这些群，支持逗号/空格/方括号分隔 |
 | `DEEPSEEK_GROUP_REPLY_PROBABILITY` | `float` | `0.05` | 非 @ 消息随机回复概率，0–1 |
 | `DEEPSEEK_GROUP_REPLY_COOLDOWN` | `float` | `60.0` | 同一群两次回复之间的最小间隔（秒） |
-| `DEEPSEEK_GROUP_HISTORY_MESSAGES` | `int` | `50` | 群聊上下文最多加载多少条消息 |
+| `DEEPSEEK_GROUP_HISTORY_MESSAGES` | `int` | `50` | 关闭群聊压缩时，群聊上下文最多加载多少条消息 |
+| `DEEPSEEK_GROUP_COMPRESSION_ENABLED` | `bool` | `True` | 是否启用群聊上下文压缩 |
+| `DEEPSEEK_GROUP_COMPRESSION_BATCH_MESSAGES` | `int` | `200` | 每积累多少条未压缩群消息压缩一次 |
+| `DEEPSEEK_GROUP_COMPRESSION_TRIGGER_TOKENS` | `int` | `900000` | 上一次请求的 prompt token 超过该值时触发压缩 |
+| `DEEPSEEK_GROUP_COMPRESSION_SUMMARY_MAX_TOKENS` | `int` | `10000` | 每次压缩生成的摘要上限（token） |
+| `DEEPSEEK_GROUP_COMPRESSION_MERGE_SUMMARIES` | `int` | `4` | 二级压缩时至少合并多少段旧摘要 |
 | `DEEPSEEK_TOOLS_ENABLED` | `bool` | `True` | 是否允许模型调用工具 |
 | `DEEPSEEK_TOOL_MAX_ROUNDS` | `int` | `3` | 单次回复最多允许几轮工具调用 |
 | `DEEPSEEK_POKE_ENABLED` | `bool` | `True` | 是否启用戳一戳工具和戳一戳事件回应 |
@@ -362,7 +373,9 @@ AI：还在忙吗？就是有点惦记你面试的结果。
 - 进入模型时格式为“昵称(QQ)：内容”，例如“小明(123456)：今天吃什么”；
 - 群内每个成员有独立的成员记忆，按 `bot_id + group_id + sender_id` 保存；整个群另有一份群共享记忆；
 - 当前发言人说话时，注入该成员的成员记忆和整群共享记忆；不会注入其他成员的私人记忆；
-- 最多加载最近 `DEEPSEEK_GROUP_HISTORY_MESSAGES` 条群消息；
+- 启用群聊压缩时加载全部未压缩群消息；关闭压缩时只加载最近 `DEEPSEEK_GROUP_HISTORY_MESSAGES` 条；
+- 群聊压缩默认每 200 条未压缩消息触发一次；上一次请求的 prompt token 超过 900k 时也会触发；
+- 消息不足 200 条但仍超过 900k token 时，说明历史摘要本身过大，转为合并部分旧摘要（二级压缩）；
 - 普通图片、表情等非文本消息只记录为 `[图片]` / `[非文本消息]`，不做图像理解；表情包会额外存入全局表情库；
 - 群聊启用记忆、戳一戳、表情包和联网搜索工具；不启用历史查询和定时任务工具；
 - 群聊戳一戳只戳当前发言人，不会戳其他群成员；
@@ -385,7 +398,10 @@ DEEPSEEK_GROUP_REPLY_COOLDOWN=60
 - 群聊每条消息都会写入 `group_messages` 表，包含 `bot_id`、`group_id`、`sender_id`、`sender_name`、`role` 和 `content`；未触发回复的消息也会保存。
 - 私聊未压缩消息超过 `DEEPSEEK_COMPRESSION_TRIGGER_TURNS` 轮（默认 30 轮）时，插件会把最早 `DEEPSEEK_COMPRESSION_BATCH_MESSAGES` 条（默认 20 条）交给模型压缩成摘要，保存到 `summaries` 表，并在后续请求中放到 system 指令之后。
 - 私聊被压缩的消息不会删除，只是标记为 `compressed = 1`，便于保留原始记录；可用 `sqlite3` 直接查看。
-- 群聊上下文不做压缩，每次只加载最近 `DEEPSEEK_GROUP_HISTORY_MESSAGES` 条；完整记录保留在 `group_messages` 表。
+- 群聊压缩把最早的一批未压缩消息交给模型生成摘要，写入 `group_summaries` 表，并把消息标记为 `compressed = 1`；后续请求把摘要拼进 system 的【群聊历史摘要】。
+- 群聊压缩结果限制在 `DEEPSEEK_GROUP_COMPRESSION_SUMMARY_MAX_TOKENS`（默认 10000 token）以内；每次回复后按 token 预算检查，消息达到一批时做一级压缩，否则超预算时做二级摘要合并。
+- 群聊压缩请求会原样重放上一次真实对话请求的 system 和全部消息，只在末尾追加压缩指令，从而尽量命中 DeepSeek 的前缀缓存，降低压缩成本。
+- 群聊的 token 检测优先使用 API 返回的 `prompt_tokens`；API 未返回用量时使用插件内置的字符数估算。
 - `query_chat_history` 工具只查询私聊的 `messages` 表；群聊不启用历史查询工具。
 - `messages.created_at` 和 `group_messages.created_at` 以 UTC 保存；工具输入和返回的时间统一按 UTC+8 解释和展示。
 - 发送 `/清空` 会删除当前私聊用户的 `messages`、`summaries` 和 `memories` 记录，保留 `user_prompts` 中的自定义人设；群聊上下文和群记忆不会被 `/清空` 删除。
@@ -648,11 +664,22 @@ DEEPSEEK_GROUP_REPLY_COOLDOWN=60
 
 ## 代码结构
 
+- `chat.py`：运行时依赖（`client` / `store`）、响应规则、发送逻辑和 OneBot 事件入口；
+- `constants.py`：固定提示文本和 `Sender` 类型；
+- `timing.py`：回复延迟、命令前缀判断和提问判断；
+- `prompts.py`：system 提示词拼装（人设、输出规则、摘要、长期记忆）；
+- `context.py`：把历史消息、摘要和记忆拼成 API 请求；
+- `compression.py`：私聊和群聊的上下文压缩（含群聊两级压缩与前缀缓存复用）；
+- `replies.py`：携带上下文请求模型，并持久化本轮问答；
+- `usage.py`：token 用量统计、回复日志和错误文案；
+- `tokens.py`：本地 token 估算与截断；
 - `nonebot_plugin_aichat_deepseek/tools/<tool>.py`：每个工具独立模块，包含 `DEFINITION`、`execute()` 和 `TOOL`；
 - `tools/registry.py`：汇总工具、按开关过滤定义、统一分发执行；
 - `tools/base.py`：`Tool` 描述对象、`ToolContext` 和参数处理工具；
 - `tools/__init__.py`：保持 `execute_tool` / `build_tool_definitions` 等原有入口稳定；
 - `scheduled_tasks.py`：加载 APScheduler、注册任务，到点后调用模型生成主动消息或戳一戳。
+
+`chat.py` 中的 `_build_*`、`compress_*`、`_generate_*` 是兼容入口，会注入当前运行时依赖；因此测试和外部代码仍然可以通过 `chat.client` / `chat.store` 替换依赖。
 
 新增工具时，只需新增一个工具模块并加入 `registry.ALL_TOOLS`，不需要修改其他工具的实现。
 
