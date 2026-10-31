@@ -10,6 +10,7 @@ from .base import (
     ToolContext,
     clip,
     error,
+    group_scope,
     make_definition,
     parse_limit,
 )
@@ -18,7 +19,8 @@ NAME = "search_user_memory"
 
 DEFINITION = make_definition(
     NAME,
-    "按关键词搜索当前用户已保存的长期记忆。",
+    "按关键词搜索当前用户的长期记忆。"
+    "群聊中只搜索当前发言人（按 QQ 区分）的成员记忆。",
     {
         "keyword": {
             "type": "string",
@@ -37,11 +39,26 @@ def execute(args: dict[str, Any], ctx: ToolContext) -> str:
     if keyword is not None and not isinstance(keyword, str):
         return error("keyword 必须是字符串")
 
-    rows = ctx.store.search_memories(
-        ctx.session_key,
-        keyword=keyword.strip() if keyword else None,
-        limit=parse_limit(args.get("limit", 10), 10),
-    )
+    limit = parse_limit(args.get("limit", 10), 10)
+    if ctx.chat_type == "group":
+        scope = group_scope(ctx)
+        if scope is None:
+            return error("群聊记忆上下文不完整")
+        bot_id, group_id, sender_id = scope
+        rows = ctx.store.search_group_memories(
+            bot_id,
+            group_id,
+            "member",
+            user_id=sender_id,
+            keyword=keyword.strip() if keyword else None,
+            limit=limit,
+        )
+    else:
+        rows = ctx.store.search_memories(
+            ctx.session_key,
+            keyword=keyword.strip() if keyword else None,
+            limit=limit,
+        )
     payload = {
         "count": len(rows),
         "memories": [

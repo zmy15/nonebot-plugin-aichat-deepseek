@@ -7,13 +7,19 @@ from typing import Any
 
 from ..config import plugin_config
 from ..stickers import StickerError, send_sticker_image
-from .base import Tool, ToolContext, error, make_definition
+from .base import (
+    Tool,
+    ToolContext,
+    error,
+    make_definition,
+    sticker_scope_key,
+)
 
 NAME = "send_sticker"
 
 DEFINITION = make_definition(
     NAME,
-    "从当前用户的表情库中查找并发送一个表情包。"
+    "从全局表情库中查找并发送一个表情包，私聊和群聊共用。"
     "sticker_id 和 keyword 至少提供一个，优先使用 sticker_id。"
     "不要等用户明确要求，聊天中可以根据情绪主动发送合适的表情包。",
     {
@@ -34,6 +40,8 @@ async def execute(args: dict[str, Any], ctx: ToolContext) -> str:
     if keyword is not None and not isinstance(keyword, str):
         return error("keyword 必须是字符串")
 
+    sticker_key = sticker_scope_key(ctx)
+
     sticker: dict[str, Any] | None = None
     sticker_id_value = args.get("sticker_id")
     if sticker_id_value is not None:
@@ -41,19 +49,19 @@ async def execute(args: dict[str, Any], ctx: ToolContext) -> str:
             sticker_id = int(sticker_id_value)
         except (TypeError, ValueError):
             return error("sticker_id 必须是整数")
-        sticker = ctx.store.get_sticker(ctx.session_key, sticker_id)
+        sticker = ctx.store.get_sticker(sticker_key, sticker_id)
         if sticker is None:
             return error(
                 "没有找到该表情包，请使用本轮提示或 search_stickers 返回的 ID"
             )
     elif keyword and keyword.strip():
         rows = ctx.store.search_stickers(
-            ctx.session_key, keyword=keyword.strip(), limit=1
+            sticker_key, keyword=keyword.strip(), limit=1
         )
         if not rows:
             examples = [
                 row["description"]
-                for row in ctx.store.search_stickers(ctx.session_key, limit=5)
+                for row in ctx.store.search_stickers(sticker_key, limit=5)
                 if row["description"]
             ]
             hint = (
@@ -65,6 +73,37 @@ async def execute(args: dict[str, Any], ctx: ToolContext) -> str:
         sticker = rows[0]
     else:
         return error("sticker_id 和 keyword 至少提供一个")
+
+    if ctx.chat_type == "group":
+        if ctx.bot_id is None or ctx.group_id is None:
+            return error("群聊表情包上下文不完整")
+        try:
+            bot = ctx.get_bot(str(ctx.bot_id))
+        except Exception:
+            return error("机器人当前未连接，无法发送表情包")
+        try:
+            method = await send_sticker_image(
+                bot,
+                None,
+                sticker["file_path"],
+                group_id=ctx.group_id,
+            )
+        except StickerError as exc:
+            return error(str(exc))
+        ctx.store.record_sticker_used(
+            sticker_key, int(sticker["id"])
+        )
+        return json.dumps(
+            {
+                "sent": True,
+                "sticker_id": sticker["id"],
+                "description": sticker["description"] or None,
+                "tags": sticker["tags"] or None,
+                "method": method,
+                "group_id": ctx.group_id,
+            },
+            ensure_ascii=False,
+        )
 
     self_id, separator, user_id = ctx.session_key.partition(":")
     if not separator or not self_id or not user_id:
@@ -86,7 +125,7 @@ async def execute(args: dict[str, Any], ctx: ToolContext) -> str:
     except StickerError as exc:
         return error(str(exc))
 
-    ctx.store.record_sticker_used(ctx.session_key, int(sticker["id"]))
+    ctx.store.record_sticker_used(sticker_key, int(sticker["id"]))
     return json.dumps(
         {
             "sent": True,

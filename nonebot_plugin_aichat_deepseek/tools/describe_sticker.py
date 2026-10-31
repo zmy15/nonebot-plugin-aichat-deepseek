@@ -7,7 +7,13 @@ from typing import Any
 
 from ..config import plugin_config
 from ..formatting import strip_markdown
-from .base import Tool, ToolContext, error, make_definition
+from .base import (
+    Tool,
+    ToolContext,
+    error,
+    make_definition,
+    sticker_scope_key,
+)
 from .sticker_utils import (
     MAX_STICKER_DESCRIPTION_CHARS,
     normalize_tags,
@@ -18,6 +24,7 @@ NAME = "describe_sticker"
 DEFINITION = make_definition(
     NAME,
     "记录或更新一个已收藏表情包的含义。"
+    "所有私聊和群聊共用同一个全局表情库。"
     "用户发送表情包后，消息里会给出表情包 ID；"
     "请根据图片内容或用户说明，用一两个词记录它表达的情绪或含义。"
     "如果用户明确说明了含义，必须优先采用用户的说法。",
@@ -67,8 +74,9 @@ def execute(args: dict[str, Any], ctx: ToolContext) -> str:
     except ValueError as exc:
         return error(str(exc))
 
+    sticker_key = sticker_scope_key(ctx)
     if not ctx.store.update_sticker_description(
-        ctx.session_key, sticker_id, description, tags
+        sticker_key, sticker_id, description, tags
     ):
         return error(
             "没有找到该表情包，请使用本轮提示或 search_stickers 返回的 ID"

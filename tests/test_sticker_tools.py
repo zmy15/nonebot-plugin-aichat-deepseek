@@ -28,9 +28,14 @@ def test_sticker_tool_definitions(tools_mod) -> None:
 async def test_describe_and_search_sticker_tools(
     tools_mod, store_cls, tmp_path
 ) -> None:
+    from nonebot_plugin_aichat_deepseek.history import STICKER_LIBRARY_KEY
+
     store = store_cls()
     sticker = store.add_sticker(
-        "1:2", "a" * 64, tmp_path / "a.png", description=""
+        STICKER_LIBRARY_KEY,
+        "a" * 64,
+        tmp_path / "a.png",
+        description="",
     )
 
     described = json.loads(
@@ -75,7 +80,7 @@ async def test_describe_and_search_sticker_tools(
             store,
         )
     )
-    assert "error" in other
+    assert other["saved"] is True
     store.close()
 
 
@@ -93,11 +98,17 @@ async def test_send_sticker_tool(
     bot = FakeBot()
     monkeypatch.setattr(tools_mod, "get_bot", lambda self_id: bot)
 
+    from nonebot_plugin_aichat_deepseek.history import STICKER_LIBRARY_KEY
+
     path = tmp_path / "sticker.png"
     path.write_bytes(PNG)
     store = store_cls()
     sticker = store.add_sticker(
-        "1:2", "a" * 64, path, description="无语", tags="无语,翻白眼"
+        STICKER_LIBRARY_KEY,
+        "a" * 64,
+        path,
+        description="无语",
+        tags="无语,翻白眼",
     )
 
     sent = json.loads(
@@ -115,18 +126,101 @@ async def test_send_sticker_tool(
     assert bot.calls[0][1]["user_id"] == 2
     assert bot.calls[0][1]["message"][0]["type"] == "image"
 
-    used = store.get_sticker("1:2", sticker["id"])
+    used = store.get_sticker(STICKER_LIBRARY_KEY, sticker["id"])
     assert used is not None
     assert used["use_count"] == 1
+    store.close()
+
+
+async def test_group_sticker_tools(
+    tools_mod, store_cls, tmp_path, monkeypatch
+) -> None:
+    class FakeBot:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict]] = []
+
+        async def call_api(self, api: str, **kwargs):
+            self.calls.append((api, kwargs))
+            return {}
+
+    bot = FakeBot()
+    monkeypatch.setattr(tools_mod, "get_bot", lambda self_id: bot)
+    from nonebot_plugin_aichat_deepseek.history import STICKER_LIBRARY_KEY
+
+    path = tmp_path / "group-sticker.png"
+    path.write_bytes(PNG)
+    store = store_cls()
+    sticker = store.add_sticker(
+        STICKER_LIBRARY_KEY,
+        "c" * 64,
+        path,
+        description="群聊无语",
+    )
+
+    described = json.loads(
+        await tools_mod.execute_tool(
+            "describe_sticker",
+            json.dumps(
+                {"sticker_id": sticker["id"], "description": "群嘲"},
+                ensure_ascii=False,
+            ),
+            "group:1:123",
+            store,
+            chat_type="group",
+            bot_id=1,
+            group_id=123,
+            sender_id=2,
+            sender_name="小明",
+        )
+    )
+    assert described["saved"] is True
+
+    found = json.loads(
+        await tools_mod.execute_tool(
+            "search_stickers",
+            json.dumps({"keyword": "群嘲"}, ensure_ascii=False),
+            "group:1:123",
+            store,
+            chat_type="group",
+            bot_id=1,
+            group_id=123,
+            sender_id=2,
+            sender_name="小明",
+        )
+    )
+    assert found["count"] == 1
+
+    sent = json.loads(
+        await tools_mod.execute_tool(
+            "send_sticker",
+            json.dumps({"sticker_id": sticker["id"]}),
+            "group:1:123",
+            store,
+            chat_type="group",
+            bot_id=1,
+            group_id=123,
+            sender_id=2,
+            sender_name="小明",
+        )
+    )
+    assert sent["sent"] is True
+    assert sent["group_id"] == 123
+    assert bot.calls[0][0] == "send_group_msg"
+    assert bot.calls[0][1]["group_id"] == 123
     store.close()
 
 
 async def test_send_sticker_tool_reports_missing_match(
     tools_mod, store_cls, tmp_path
 ) -> None:
+    from nonebot_plugin_aichat_deepseek.history import STICKER_LIBRARY_KEY
+
     store = store_cls()
     store.add_sticker(
-        "1:2", "a" * 64, tmp_path / "a.png", description="无语"
+        STICKER_LIBRARY_KEY,
+        "a" * 64,
+        tmp_path / "a.png",
+        description="无语",
     )
 
     missing = json.loads(
@@ -144,14 +238,4 @@ async def test_send_sticker_tool_reports_missing_match(
         await tools_mod.execute_tool("send_sticker", "{}", "1:2", store)
     )
     assert "至少" in no_args["error"]
-
-    wrong_user = json.loads(
-        await tools_mod.execute_tool(
-            "send_sticker",
-            json.dumps({"keyword": "无语"}, ensure_ascii=False),
-            "1:3",
-            store,
-        )
-    )
-    assert "没有找到" in wrong_user["error"]
     store.close()

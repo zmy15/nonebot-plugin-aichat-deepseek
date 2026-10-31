@@ -13,13 +13,14 @@ from .base import (
     error,
     make_definition,
     parse_limit,
+    sticker_scope_key,
 )
 
 NAME = "search_stickers"
 
 DEFINITION = make_definition(
     NAME,
-    "查询当前用户已收藏的表情包。"
+    "查询全局已收藏的表情包，私聊和群聊共用。"
     "关键词会匹配表情包的含义和标签；不传关键词时返回常用的表情包。"
     "用于在主动发表情包前确认有哪些含义可选。",
     {
@@ -42,8 +43,9 @@ def execute(args: dict[str, Any], ctx: ToolContext) -> str:
 
     default_limit = plugin_config.deepseek_sticker_search_limit
     limit = parse_limit(args.get("limit", default_limit), default_limit)
+    sticker_key = sticker_scope_key(ctx)
     rows = ctx.store.search_stickers(
-        ctx.session_key,
+        sticker_key,
         keyword=keyword.strip() if keyword else None,
         limit=limit,
     )

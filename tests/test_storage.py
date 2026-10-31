@@ -137,6 +137,25 @@ def test_trigger_zero_disables_compression(store_cls, tmp_path) -> None:
     store.close()
 
 
+def test_add_single_message_and_limit(store_cls, tmp_path) -> None:
+    db_path = tmp_path / "chat.db"
+    store = store_cls(db_path, max_turns=30)
+    for index in range(5):
+        store.add_message("group:1:123", "user", f"消息{index}")
+
+    assert [item["content"] for item in store.build_messages(
+        "group:1:123", limit=2
+    )] == ["消息3", "消息4"]
+    assert store.build_messages("group:1:123", limit=0) == []
+    store.close()
+
+    loaded = store_cls(db_path, max_turns=30)
+    assert [item["content"] for item in loaded.build_messages(
+        "group:1:123", limit=2
+    )] == ["消息3", "消息4"]
+    loaded.close()
+
+
 def test_database_parent_directory_is_created(store_cls, tmp_path) -> None:
     db_path = tmp_path / "nested" / "data" / "chat.db"
     store = store_cls(db_path, max_turns=30)

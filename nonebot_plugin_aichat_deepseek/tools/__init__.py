@@ -20,6 +20,7 @@ from .base import (
 )
 from .cancel_scheduled_task import NAME as TOOL_CANCEL_SCHEDULED_TASK
 from .clear_user_prompt import NAME as TOOL_CLEAR_USER_PROMPT
+from .delete_group_memory import NAME as TOOL_DELETE_GROUP_MEMORY
 from .delete_memory import NAME as TOOL_DELETE_MEMORY
 from .describe_sticker import NAME as TOOL_DESCRIBE_STICKER
 from .get_user_prompt import NAME as TOOL_GET_USER_PROMPT
@@ -29,11 +30,14 @@ from .poke_user import NAME as TOOL_POKE_USER
 from .query_history import NAME as TOOL_QUERY_HISTORY
 from .registry import (
     TOOL_DEFINITIONS,
+    build_group_tool_definitions,
     build_tool_definitions,
     execute_tool as _execute_tool,
 )
+from .save_group_memory import NAME as TOOL_SAVE_GROUP_MEMORY
 from .save_memory import NAME as TOOL_SAVE_MEMORY
 from .schedule_task import NAME as TOOL_SCHEDULE_TASK
+from .search_group_memory import NAME as TOOL_SEARCH_GROUP_MEMORY
 from .search_memory import NAME as TOOL_SEARCH_MEMORY
 from .search_stickers import NAME as TOOL_SEARCH_STICKERS
 from .send_sticker import NAME as TOOL_SEND_STICKER
@@ -50,6 +54,11 @@ async def execute_tool(
     *,
     search_web: SearchCallable | None = None,
     get_scheduler: SchedulerProvider | None = None,
+    chat_type: str = "private",
+    bot_id: int | None = None,
+    group_id: int | None = None,
+    sender_id: int | None = None,
+    sender_name: str = "",
 ) -> str:
     """执行模型请求的工具，保留原有入口并注入外部依赖。"""
     return await _execute_tool(
@@ -60,6 +69,11 @@ async def execute_tool(
         get_bot=get_bot,
         search_web=search_web,
         get_scheduler=get_scheduler,
+        chat_type=chat_type,
+        bot_id=bot_id,
+        group_id=group_id,
+        sender_id=sender_id,
+        sender_name=sender_name,
     )
 
 
@@ -71,12 +85,16 @@ __all__ = [
     "MEMORY_CATEGORY_LABELS",
     "TOOL_DEFINITIONS",
     "build_tool_definitions",
+    "build_group_tool_definitions",
     "execute_tool",
     "TOOL_QUERY_HISTORY",
     "TOOL_WEB_SEARCH",
     "TOOL_SAVE_MEMORY",
     "TOOL_SEARCH_MEMORY",
     "TOOL_DELETE_MEMORY",
+    "TOOL_SAVE_GROUP_MEMORY",
+    "TOOL_SEARCH_GROUP_MEMORY",
+    "TOOL_DELETE_GROUP_MEMORY",
     "TOOL_SET_USER_PROMPT",
     "TOOL_GET_USER_PROMPT",
     "TOOL_CLEAR_USER_PROMPT",

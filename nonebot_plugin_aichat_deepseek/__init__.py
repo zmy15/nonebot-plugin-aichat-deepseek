@@ -13,9 +13,12 @@ from .config import Config
 
 __plugin_meta__ = PluginMetadata(
     name="DeepSeek 对话",
-    description="基于 DeepSeek API 的 AI 私聊对话插件，无需命令前缀",
+    description="基于 DeepSeek API 的 AI 私聊/群聊对话插件，无需命令前缀",
     usage=(
         "私聊机器人直接发送消息即可开始对话，支持多轮上下文。\n"
+        "群聊中 @ 机器人会回复，也会按概率随机参与；"
+        "群聊上下文按群保存，成员记忆按 QQ 区分，并有一份整群共享记忆；"
+        "群聊支持戳一戳、联网搜索，所有私聊和群聊共用全局表情库。\n"
         "回复会自动去除 Markdown 并按真人节奏分条发送。\n"
         "对话历史保存到本地数据库，默认超过 30 轮自动压缩摘要。\n"
         "模型可调用 query_chat_history 查询历史聊天记录（UTC+8）。\n"

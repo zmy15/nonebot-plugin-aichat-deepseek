@@ -1,27 +1,29 @@
 # nonebot-plugin-aichat-deepseek
 
-基于 [DeepSeek](https://www.deepseek.com/) API 的 NoneBot2 私聊 AI 对话插件。
+基于 [DeepSeek](https://www.deepseek.com/) API 的 NoneBot2 私聊 / 群聊 AI 对话插件。
 
-私聊机器人直接发送消息即可开始对话，**不需要任何命令前缀**；群聊消息不会触发。
+私聊机器人直接发送消息即可开始对话，**不需要任何命令前缀**；群聊中 @ 机器人会回复，非 @ 时按概率随机参与。
 
 ## 功能
 
-- 仅响应 OneBot V11 私聊消息，无需 `/` 等前缀
+- 支持 OneBot V11 私聊和群聊消息，无需 `/` 等前缀
+- 群聊适配：默认所有群生效，被 @ 必回，非 @ 时按概率随机参与，群聊上下文按群保存
 - 多轮上下文（默认加载最近 30 轮，按用户隔离）
 - 当前上下文持久化到 SQLite，启动时自动加载历史
 - 历史聊天记录复用同一数据库，模型可调用 `query_chat_history` 查询过去聊过什么
 - 长期记忆：自动保存用户信息、偏好、习惯等，并在后续对话中注入 system 指令
+- 群聊记忆：群成员记忆按 QQ 区分，另有一份整群共享记忆
 - 单个用户自定义 system 提示词：通过工具保存专属人设、语气或回复风格
 - `/清空` 命令：清空当前私聊用户的对话上下文
-- 戳一戳：模型可调用工具戳用户；用户戳机器人时也会用 AI 回应，并可以戳回去
+- 戳一戳：模型可戳当前用户或当前群发言人；用户戳机器人时也会用 AI 回应，并可以戳回去
 - 连续消息聚合：用户分多次发送的一句话会合并；AI 判断不完整时先不回复，等提问完整
 - 回复抖动：首条回复前有随机停顿，多条回复之间也有随机间隔
 - 支持私聊图片理解：图片经 Files API 上传后以 `file_id` 交给 `deepseek-flash` 分析
 - 联网搜索：模型可调用 `web_search` 查询实时信息、新闻等网页内容
 - 定时主动聊天：AI 可自行判断并安排稍后找用户说话，也可以定时戳一戳
 - 未回复追问：AI 提问后用户一段时间没回复，会自动再补一句
-- 表情包收藏：自动把私聊收到的表情包存入本地表情库，记录含义和标签
-- 模型可调用工具按含义查询表情包，并通过 OneBot 图片消息发送
+- 表情包收藏：自动把私聊/群聊收到的表情包存入对应表情库，记录含义和标签
+- 模型可调用工具按含义查询表情包，并通过 OneBot 图片消息发送到私聊或群聊
 - 未压缩消息超过 30 轮时，自动把最早 20 条消息压缩成摘要，放到 system 指令之后
 - 自动移除 Markdown 标记，只发送纯文本
 - 模型用 `|||` 分隔多条消息，插件按随机间隔逐条发送，更像真人聊天
@@ -52,6 +54,12 @@ DEEPSEEK_API_KEY=sk-xxxxxxxx
 DEEPSEEK_MODEL=deepseek-flash
 DEEPSEEK_SYSTEM_PROMPT="你是一个乐于助人的 AI 助手，请使用简体中文回答用户的问题。"
 DEEPSEEK_DB_PATH=data/nonebot_plugin_aichat_deepseek/chat.db
+DEEPSEEK_GROUP_ENABLED=true
+# 留空表示所有群；填写后只处理这些群
+DEEPSEEK_GROUP_IDS=
+DEEPSEEK_GROUP_REPLY_PROBABILITY=0.05
+DEEPSEEK_GROUP_REPLY_COOLDOWN=60
+DEEPSEEK_GROUP_HISTORY_MESSAGES=50
 DEEPSEEK_TOOLS_ENABLED=true
 DEEPSEEK_TOOL_MAX_ROUNDS=3
 DEEPSEEK_POKE_ENABLED=true
@@ -94,6 +102,11 @@ DEEPSEEK_REPLY_INTERVAL=1.0
 | `DEEPSEEK_API_BASE` | `str` | `https://api.deepseek.com` | API 地址，可替换为兼容代理 |
 | `DEEPSEEK_MODEL` | `str` | `deepseek-flash` | 模型名，可选 `deepseek-flash`、`deepseek-v4-pro` |
 | `DEEPSEEK_DB_PATH` | `str` | `data/nonebot_plugin_aichat_deepseek/chat.db` | SQLite 数据库路径，相对路径基于机器人启动目录 |
+| `DEEPSEEK_GROUP_ENABLED` | `bool` | `True` | 是否启用群聊响应 |
+| `DEEPSEEK_GROUP_IDS` | `str` | `""` | 群号白名单；留空表示所有群，填写后只响应这些群，支持逗号/空格/方括号分隔 |
+| `DEEPSEEK_GROUP_REPLY_PROBABILITY` | `float` | `0.05` | 非 @ 消息随机回复概率，0–1 |
+| `DEEPSEEK_GROUP_REPLY_COOLDOWN` | `float` | `60.0` | 同一群两次回复之间的最小间隔（秒） |
+| `DEEPSEEK_GROUP_HISTORY_MESSAGES` | `int` | `50` | 群聊上下文最多加载多少条消息 |
 | `DEEPSEEK_TOOLS_ENABLED` | `bool` | `True` | 是否允许模型调用工具 |
 | `DEEPSEEK_TOOL_MAX_ROUNDS` | `int` | `3` | 单次回复最多允许几轮工具调用 |
 | `DEEPSEEK_POKE_ENABLED` | `bool` | `True` | 是否启用戳一戳工具和戳一戳事件回应 |
@@ -156,7 +169,7 @@ DEEPSEEK_REPLY_INTERVAL=1.0
 
 插件会自动在系统提示词后追加输出约束：模型只输出纯文本，优先分成多条短消息，每条像真人聊天，一句话不要太长、句末可以不带标点，并尽量用 `|||` 分隔。如果模型没有输出分隔符，会按空行段落拆分（`DEEPSEEK_SPLIT_PARAGRAPHS`），再按配置的间隔逐条发送。发送前还会移除残留的 Markdown 标记。可以通过 `DEEPSEEK_SPLIT_DELIMITER` 更换分隔符，或把 `DEEPSEEK_REPLY_INTERVAL` 设为 `0` 关闭间隔。
 
-群聊中发送的消息不会触发本插件；以 `/` 开头的消息会交给命令处理器，不会进入对话。
+群聊中默认所有群都生效；如果填写了 `DEEPSEEK_GROUP_IDS`，则只处理这些群。以 `/` 开头的消息会交给命令处理器，不会进入对话。
 
 ## 消息聚合与回复节奏
 
@@ -255,12 +268,12 @@ DEEPSEEK_REPLY_INTERVAL=1.0
 
 ## 表情包
 
-启用 `DEEPSEEK_STICKER_ENABLED` 后，私聊收到表情包时会自动收藏：
+启用 `DEEPSEEK_STICKER_ENABLED` 后，私聊和群聊收到表情包时都会自动收藏：
 
 1. 识别 OneBot `image` 消息段：`sub_type` 为 1（表情包）、3（斗图）、7（贴图），`summary` 含“表情”，或带有商城表情的 `emoji_id` / `emoji_package_id` / `key`；
 2. 如果客户端没有标记类型，用户明确说“记住/收藏/保存这个表情包”时也会收藏；
 3. 图片按 SHA-256 保存到 `DEEPSEEK_STICKER_DIR`，相同哈希只保留一份文件；
-4. 元数据写入 SQLite 的 `stickers` 表，按 `session_key` 隔离，记录含义、标签和使用次数。
+4. 元数据写入 SQLite 的 `stickers` 表，所有私聊和群聊共用同一个全局表情库，不按用户或群隔离。
 
 模型会在消息中看到本轮表情包的 ID，并可以：
 
@@ -269,12 +282,13 @@ DEEPSEEK_REPLY_INTERVAL=1.0
 - 调用 `send_sticker` 发送表情包；
 - 模型会在聊天中主动用表情包表达情绪，不必等用户明确要求。
 
-发送通过 OneBot 11 的 `send_private_msg`，`image` 段的 `file` 优先使用本地文件 `file://` URI，失败时自动回退到 `base64://`，因此不要求 OneBot 实现和机器人在同一台机器上。
+发送时私聊使用 OneBot 11 的 `send_private_msg`，群聊使用 `send_group_msg`；`image` 段的 `file` 优先使用本地文件 `file://` URI，失败时自动回退到 `base64://`，因此不要求 OneBot 实现和机器人在同一台机器上。
 
 注意：
 
-- 表情包按用户隔离，不会跨私聊用户共享；
-- 自动收藏依赖图片处理，`DEEPSEEK_IMAGE_ENABLED=false` 时不会收藏表情包；模型能看到图片时才能自动判断含义，也可以由用户直接说明含义；
+- 所有私聊和群聊共用同一个表情库，不做用户或群隔离；
+- 私聊自动收藏依赖图片处理，`DEEPSEEK_IMAGE_ENABLED=false` 时不会收藏表情包；群聊收藏不依赖图片理解；
+- 群聊看不到图片内容，`describe_sticker` 只应在用户说明含义时调用，不要凭空猜测；
 - 表情包文件不会因为 `/清空` 被删除；
 - 如果使用的 OneBot 实现没有上报 `sub_type` 等字段，可以对机器人说“记住这个表情包”强制收藏。
 
@@ -337,27 +351,59 @@ AI：今天面试怎么样？
 AI：还在忙吗？就是有点惦记你面试的结果。
 ```
 
+## 群聊
+
+启用 `DEEPSEEK_GROUP_ENABLED` 后，默认所有群都生效；如果填写了 `DEEPSEEK_GROUP_IDS`，则只处理这些群。机器人在群中：
+
+- 被 @ 时必定回复；
+- 没有被 @ 时，按 `DEEPSEEK_GROUP_REPLY_PROBABILITY`（默认 0.05）随机决定是否参与；
+- 同一群两次回复至少间隔 `DEEPSEEK_GROUP_REPLY_COOLDOWN` 秒（默认 60）；
+- 群聊消息单独保存在 `group_messages` 表，按 `bot_id + group_id` 隔离，并记录每条的 `sender_id`（QQ）和 `sender_name`；
+- 进入模型时格式为“昵称(QQ)：内容”，例如“小明(123456)：今天吃什么”；
+- 群内每个成员有独立的成员记忆，按 `bot_id + group_id + sender_id` 保存；整个群另有一份群共享记忆；
+- 当前发言人说话时，注入该成员的成员记忆和整群共享记忆；不会注入其他成员的私人记忆；
+- 最多加载最近 `DEEPSEEK_GROUP_HISTORY_MESSAGES` 条群消息；
+- 普通图片、表情等非文本消息只记录为 `[图片]` / `[非文本消息]`，不做图像理解；表情包会额外存入全局表情库；
+- 群聊启用记忆、戳一戳、表情包和联网搜索工具；不启用历史查询和定时任务工具；
+- 群聊戳一戳只戳当前发言人，不会戳其他群成员；
+- 所有私聊和群聊共用同一个全局表情库，不按用户或群隔离；群聊收到表情包会存入全局表情库，发送时只发到当前群；
+- 群聊中可以使用 `web_search` 查询实时信息。
+
+示例：
+
+```dotenv
+DEEPSEEK_GROUP_IDS=123456789,987654321
+DEEPSEEK_GROUP_REPLY_PROBABILITY=0.05
+DEEPSEEK_GROUP_REPLY_COOLDOWN=60
+```
+
 ## 数据存储与上下文压缩
 
-- 当前上下文数据库默认位于 `data/nonebot_plugin_aichat_deepseek/chat.db`，启动时自动创建表并加载未压缩的历史消息和摘要。
-- 每完成一轮问答，用户消息和 AI 原始回复会立即写入 `messages` 表。
-- 未压缩消息超过 `DEEPSEEK_COMPRESSION_TRIGGER_TURNS` 轮（默认 30 轮）时，插件会把最早 `DEEPSEEK_COMPRESSION_BATCH_MESSAGES` 条（默认 20 条）交给模型压缩成摘要，保存到 `summaries` 表，并在后续请求中放到 system 指令之后。
-- 被压缩的消息不会删除，只是标记为 `compressed = 1`，便于保留原始记录；可用 `sqlite3` 直接查看。
-- `query_chat_history` 工具直接查询同一个 `messages` 表，因此可以检索到包括已压缩消息在内的完整历史。
-- `messages.created_at` 以 UTC 保存；工具输入和返回的时间统一按 UTC+8 解释和展示。
-- 发送 `/清空` 会删除当前用户的 `messages`、`summaries` 和 `memories` 记录，保留 `user_prompts` 中的自定义人设。
-- 长期记忆保存在同一数据库的 `memories` 表中，按 `session_key` 隔离。
+- 当前上下文数据库默认位于 `data/nonebot_plugin_aichat_deepseek/chat.db`，启动时自动创建表并加载未压缩的私聊历史消息和摘要。
+- 私聊和群聊分开存储：私聊消息在 `messages` 表，群聊消息在 `group_messages` 表。
+- 私聊每完成一轮问答，用户消息和 AI 原始回复会立即写入 `messages` 表。
+- 群聊每条消息都会写入 `group_messages` 表，包含 `bot_id`、`group_id`、`sender_id`、`sender_name`、`role` 和 `content`；未触发回复的消息也会保存。
+- 私聊未压缩消息超过 `DEEPSEEK_COMPRESSION_TRIGGER_TURNS` 轮（默认 30 轮）时，插件会把最早 `DEEPSEEK_COMPRESSION_BATCH_MESSAGES` 条（默认 20 条）交给模型压缩成摘要，保存到 `summaries` 表，并在后续请求中放到 system 指令之后。
+- 私聊被压缩的消息不会删除，只是标记为 `compressed = 1`，便于保留原始记录；可用 `sqlite3` 直接查看。
+- 群聊上下文不做压缩，每次只加载最近 `DEEPSEEK_GROUP_HISTORY_MESSAGES` 条；完整记录保留在 `group_messages` 表。
+- `query_chat_history` 工具只查询私聊的 `messages` 表；群聊不启用历史查询工具。
+- `messages.created_at` 和 `group_messages.created_at` 以 UTC 保存；工具输入和返回的时间统一按 UTC+8 解释和展示。
+- 发送 `/清空` 会删除当前私聊用户的 `messages`、`summaries` 和 `memories` 记录，保留 `user_prompts` 中的自定义人设；群聊上下文和群记忆不会被 `/清空` 删除。
+- 私聊长期记忆保存在 `memories` 表，按 `session_key` 隔离。
+- 群聊记忆保存在 `group_memories` 表：`scope='member'` 按群成员 QQ 区分，`scope='group'` 保存整群共享记忆。
 - 每个用户的自定义 system 提示词保存在同一数据库的 `user_prompts` 表中，同样按 `session_key` 隔离。
-- 表情包元数据保存在同一数据库的 `stickers` 表中，图片文件保存在 `DEEPSEEK_STICKER_DIR`；`/清空` 不会删除表情包。
+- 表情包元数据保存在同一数据库的 `stickers` 表中，图片文件保存在 `DEEPSEEK_STICKER_DIR`；所有私聊和群聊共用同一个全局表情库；`/清空` 不会删除表情包。
 - 数据库为明文存储，请自行做好备份和访问权限控制。
 
 ## 长期记忆
 
 - 当用户提到长期稳定的个人信息、偏好、习惯、关系或重要事实时，模型会调用 `save_user_memory` 保存。
-- 每轮请求会把该用户最近最多 `DEEPSEEK_MEMORY_MAX_ITEMS` 条记忆注入 system 指令，受 `DEEPSEEK_MEMORY_MAX_CHARS` 字符预算限制。
+- 私聊中，每轮请求会把该用户最近最多 `DEEPSEEK_MEMORY_MAX_ITEMS` 条记忆注入 system 指令，受 `DEEPSEEK_MEMORY_MAX_CHARS` 字符预算限制。
+- 群聊中，`save_user_memory` 保存到当前发言人的成员记忆；`save_group_memory` 保存整群共享记忆。
+- 群聊每轮请求会注入整群共享记忆和当前发言人的成员记忆，不会注入其他成员的私人记忆。
 - 记忆分类：`profile`（个人信息）、`preference`（偏好）、`habit`（习惯）、`relationship`（关系）、`fact`（事实）。
-- 用户要求忘记时，模型可调用 `delete_user_memory`；需要查找更早记忆时调用 `search_user_memory`。
-- 记忆只属于当前 `session_key`，不会跨用户读取。
+- 用户要求忘记时，模型可调用 `delete_user_memory` 删除当前用户/当前成员记忆，或调用 `delete_group_memory` 删除群共享记忆；需要查找更早记忆时调用对应的 `search_*` 工具。
+- 私聊记忆按 `session_key` 隔离；群成员记忆按 `bot_id + group_id + QQ` 隔离；群共享记忆按 `bot_id + group_id` 隔离。
 
 ## 自定义 system 提示词
 
@@ -381,13 +427,13 @@ AI：还在忙吗？就是有点惦记你面试的结果。
 启用 `DEEPSEEK_POKE_ENABLED` 后支持两种行为：
 
 1. **模型主动戳用户**：用户明确要求“戳我一下”“提醒我”时，模型调用 `poke_user` 工具；不要等用户开口，对话气氛合适时也会主动戳一戳。
-2. **用户戳机器人**：私聊中用户戳机器人时，插件会生成一条 AI 回复，并提示模型可以调用 `poke_user` 戳回去；这次互动也会写入当前对话历史。
+2. **用户戳机器人**：私聊或群聊中用户戳机器人时，插件会生成一条 AI 回复，并提示模型可以调用 `poke_user` 戳回去；这次互动也会写入当前对话历史。
 
 实现说明：
 
-- `poke_user` 只作用于当前私聊用户，不接受其他用户 ID；
-- 优先调用 OneBot V11 的 `friend_poke`，失败时回退到 `send_poke`；
-- 只响应私聊里 `target_id == self_id` 的戳一戳事件，群聊戳一戳不处理；
+- `poke_user` 只作用于当前私聊用户或当前群发言人，不接受其他用户 ID；
+- 私聊优先调用 OneBot V11 的 `friend_poke`，失败时回退到 `send_poke`；群聊使用带 `group_id` 的 `send_poke`；
+- 只响应 `target_id == self_id` 的戳一戳事件；群聊还要命中允许的群；
 - 戳一戳回应会走正常的模型调用、system 提示词、自定义人设和分条发送流程；
 - 如果当前 OneBot 实现不支持相关 API，工具会返回错误，不会影响普通聊天。
 
@@ -402,6 +448,9 @@ AI：还在忙吗？就是有点惦记你面试的结果。
 | `save_user_memory` | 保存用户长期信息、偏好等 |
 | `search_user_memory` | 搜索已保存的长期记忆 |
 | `delete_user_memory` | 删除某条长期记忆 |
+| `save_group_memory` | 保存整群共享记忆（仅群聊） |
+| `search_group_memory` | 搜索整群共享记忆（仅群聊） |
+| `delete_group_memory` | 删除某条群共享记忆（仅群聊） |
 | `set_user_system_prompt` | 保存当前用户专属的 system 提示词 |
 | `get_user_system_prompt` | 查看当前用户的自定义提示词 |
 | `clear_user_system_prompt` | 清除当前用户的自定义提示词 |
@@ -413,6 +462,8 @@ AI：还在忙吗？就是有点惦记你面试的结果。
 | `describe_sticker` | 记录或更新表情包的含义 |
 | `search_stickers` | 按含义或标签查询表情包 |
 | `send_sticker` | 查询并发送一个表情包 |
+
+群聊中向模型提供记忆、戳一戳、表情包和联网搜索工具；不提供查询历史和定时任务工具。
 
 ### `query_chat_history`
 
@@ -448,7 +499,7 @@ AI：还在忙吗？就是有点惦记你面试的结果。
 | `need_content` | `boolean` | 可选，是否返回网页正文，默认 `false` |
 | `ori_question` | `string` | 可选，触发搜索的用户原始问题，1–128 个字符 |
 
-返回结果会裁剪 `snippet`、`summary` 和 `content` 的长度，避免占用过多上下文。搜索失败时返回中文错误，例如 API Key 无效、余额不足、请求过于频繁或服务暂时不可用。
+私聊和群聊都可以调用。返回结果会裁剪 `snippet`、`summary` 和 `content` 的长度，避免占用过多上下文。搜索失败时返回中文错误，例如 API Key 无效、余额不足、请求过于频繁或服务暂时不可用。
 
 ### `save_user_memory`
 
@@ -457,6 +508,8 @@ AI：还在忙吗？就是有点惦记你面试的结果。
 | `content` | `string` | 必填，要记住的内容，建议用第三人称简短描述 |
 | `category` | `string` | 可选，`profile` / `preference` / `habit` / `relationship` / `fact`，默认 `fact` |
 
+群聊中调用时，保存的是当前发言人（按 QQ 区分）的成员记忆，不会写进整群共享记忆。
+
 ### `search_user_memory`
 
 | 参数 | 类型 | 说明 |
@@ -464,11 +517,41 @@ AI：还在忙吗？就是有点惦记你面试的结果。
 | `keyword` | `string` | 可选，按关键词搜索记忆内容 |
 | `limit` | `integer` | 可选，返回 1–20 条，默认 10 |
 
+群聊中只搜索当前发言人的成员记忆。
+
 ### `delete_user_memory`
 
 | 参数 | 类型 | 说明 |
 | --- | --- | --- |
 | `memory_id` | `integer` | 必填，要删除的记忆 ID，可从注入记忆的 `#id` 或搜索工具结果中获得 |
+
+群聊中只删除当前发言人的成员记忆。
+
+### `save_group_memory`
+
+仅群聊可用。保存整群共享的长期信息，例如群规则、群活动、大家共同约定的事情。
+
+| 参数 | 类型 | 说明 |
+| --- | --- | --- |
+| `content` | `string` | 必填，要记住的群共享信息 |
+| `category` | `string` | 可选，分类同 `save_user_memory`，默认 `fact` |
+
+### `search_group_memory`
+
+仅群聊可用。按关键词搜索当前群的共享记忆。
+
+| 参数 | 类型 | 说明 |
+| --- | --- | --- |
+| `keyword` | `string` | 可选，按关键词搜索 |
+| `limit` | `integer` | 可选，返回 1–20 条，默认 10 |
+
+### `delete_group_memory`
+
+仅群聊可用。按 ID 删除当前群的一条共享记忆。
+
+| 参数 | 类型 | 说明 |
+| --- | --- | --- |
+| `memory_id` | `integer` | 必填，要删除的群记忆 ID |
 
 ### `set_user_system_prompt`
 
@@ -488,7 +571,7 @@ AI：还在忙吗？就是有点惦记你面试的结果。
 
 ### `poke_user`
 
-无参数，戳一戳当前私聊用户。用户要求时调用，对话气氛合适时也会主动戳一戳；用户戳你时也可以戳回去。优先调用 `friend_poke`，失败时尝试 `send_poke`。
+无参数。私聊中戳一戳当前用户，群聊中戳一戳当前发言人。用户要求时调用，对话气氛合适时也会主动戳一戳；用户戳你时也可以戳回去。私聊优先调用 `friend_poke`，失败时尝试 `send_poke`；群聊使用带 `group_id` 的 `send_poke`。
 
 ### `schedule_task`
 
@@ -533,7 +616,7 @@ AI：还在忙吗？就是有点惦记你面试的结果。
 | `description` | `string` | 必填，简短含义，例如：无语、嘲笑、开心 |
 | `tags` | `string` | 可选，逗号分隔的标签，例如：无语,翻白眼 |
 
-用户发送表情包后，插件会在消息中给出表情包 ID。模型可以根据图片内容记录含义；如果用户说明了含义，会优先采用用户的说法。
+用户发送表情包后，插件会在消息中给出表情包 ID。私聊中模型可以根据图片内容记录含义；群聊中只根据用户说明记录，不要凭空猜测。如果用户说明了含义，会优先采用用户的说法。所有私聊和群聊共用同一个全局表情库。
 
 ### `search_stickers`
 
@@ -542,7 +625,7 @@ AI：还在忙吗？就是有点惦记你面试的结果。
 | `keyword` | `string` | 可选，按含义或标签搜索 |
 | `limit` | `integer` | 可选，返回 1–20 条，默认 `DEEPSEEK_STICKER_SEARCH_LIMIT` |
 
-只返回当前用户自己的表情包，不会跨用户查询。
+私聊中只返回当前用户自己的表情包，不会跨用户查询；群聊中只返回当前群的表情包，不会跨群查询。
 
 ### `send_sticker`
 
@@ -551,7 +634,7 @@ AI：还在忙吗？就是有点惦记你面试的结果。
 | `sticker_id` | `integer` | 可选，要发送的表情包 ID，优先级高于 `keyword` |
 | `keyword` | `string` | 可选，按含义或标签查找并发送最匹配的一个 |
 
-`sticker_id` 和 `keyword` 至少提供一个。模型会在聊天中主动发送合适的表情包，不必等用户明确要求。发送使用 OneBot 11 的 `send_private_msg`，优先用 `file://` 本地路径，失败后自动回退到 `base64://`。
+`sticker_id` 和 `keyword` 至少提供一个。模型会在聊天中主动发送合适的表情包，不必等用户明确要求。私聊使用 `send_private_msg`，群聊使用 `send_group_msg`；优先用 `file://` 本地路径，失败后自动回退到 `base64://`。
 
 ## 命令
 

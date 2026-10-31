@@ -18,6 +18,9 @@ from .data_source import ChatMessage
 UTC = timezone.utc
 UTC8 = timezone(timedelta(hours=8), name="UTC+8")
 
+# 所有私聊和群聊共用同一个表情库
+STICKER_LIBRARY_KEY = "global"
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS messages (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -74,6 +77,36 @@ CREATE TABLE IF NOT EXISTS stickers (
 
 CREATE INDEX IF NOT EXISTS idx_stickers_session
     ON stickers (session_key, updated_at, id);
+
+CREATE TABLE IF NOT EXISTS group_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    bot_id INTEGER NOT NULL,
+    group_id INTEGER NOT NULL,
+    sender_id INTEGER,
+    sender_name TEXT NOT NULL DEFAULT '',
+    role TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
+    content TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_group_messages
+    ON group_messages (bot_id, group_id, id);
+
+CREATE TABLE IF NOT EXISTS group_memories (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    bot_id INTEGER NOT NULL,
+    group_id INTEGER NOT NULL,
+    scope TEXT NOT NULL CHECK (scope IN ('group', 'member')),
+    user_id INTEGER NOT NULL DEFAULT 0,
+    category TEXT NOT NULL DEFAULT 'fact',
+    content TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (bot_id, group_id, scope, user_id, content)
+);
+
+CREATE INDEX IF NOT EXISTS idx_group_memories
+    ON group_memories (bot_id, group_id, scope, user_id, updated_at, id);
 """
 
 
@@ -129,6 +162,80 @@ class ConversationStore:
     def _init_schema(self) -> None:
         with self._conn:
             self._conn.executescript(_SCHEMA)
+        self._migrate_stickers_to_global()
+
+    def _migrate_stickers_to_global(self) -> None:
+        """把旧的按用户/群隔离的表情包合并到全局表情库。"""
+        rows = self._conn.execute(
+            "SELECT id, sha256, file_path, mime, description, tags, "
+            "source, use_count, updated_at, last_used_at "
+            "FROM stickers WHERE session_key <> ? ORDER BY id",
+            (STICKER_LIBRARY_KEY,),
+        ).fetchall()
+        if not rows:
+            return
+
+        with self._conn:
+            for (
+                old_id,
+                sha256,
+                file_path,
+                mime,
+                description,
+                tags,
+                source,
+                use_count,
+                updated_at,
+                last_used_at,
+            ) in rows:
+                existing = self._conn.execute(
+                    "SELECT id, mime, description, tags, use_count, "
+                    "updated_at, last_used_at FROM stickers "
+                    "WHERE session_key = ? AND sha256 = ?",
+                    (STICKER_LIBRARY_KEY, sha256),
+                ).fetchone()
+                if existing is None:
+                    self._conn.execute(
+                        "UPDATE stickers SET session_key = ? WHERE id = ?",
+                        (STICKER_LIBRARY_KEY, old_id),
+                    )
+                    continue
+
+                (
+                    keep_id,
+                    keep_mime,
+                    keep_description,
+                    keep_tags,
+                    keep_use_count,
+                    keep_updated_at,
+                    keep_last_used_at,
+                ) = existing
+                merged_last_used = max(
+                    filter(
+                        None,
+                        (keep_last_used_at, last_used_at),
+                    ),
+                    default=None,
+                )
+                self._conn.execute(
+                    "UPDATE stickers SET mime = ?, description = ?, "
+                    "tags = ?, source = ?, use_count = ?, updated_at = ?, "
+                    "last_used_at = ? WHERE id = ?",
+                    (
+                        keep_mime or mime,
+                        keep_description or description,
+                        keep_tags or tags,
+                        source,
+                        int(keep_use_count) + int(use_count),
+                        max(keep_updated_at, updated_at),
+                        merged_last_used,
+                        keep_id,
+                    ),
+                )
+                self._conn.execute(
+                    "DELETE FROM stickers WHERE id = ?",
+                    (old_id,),
+                )
 
     def _load_all(self) -> None:
         for session_key, role, content in self._conn.execute(
@@ -155,12 +262,19 @@ class ConversationStore:
             self._locks[key] = lock
         return lock
 
-    def build_messages(self, key: str) -> list[ChatMessage]:
+    def build_messages(
+        self,
+        key: str,
+        limit: int | None = None,
+    ) -> list[ChatMessage]:
         """把最近的历史消息转换为 API 需要的 messages 列表。"""
-        if self._max_turns == 0:
+        if limit is None:
+            if self._max_turns == 0:
+                return []
+            limit = self._max_turns * 2
+        if limit <= 0:
             return []
         messages = self._messages.get(key, [])
-        limit = self._max_turns * 2
         if len(messages) > limit:
             messages = messages[-limit:]
         return [
@@ -197,6 +311,113 @@ class ConversationStore:
                 {"role": "assistant", "content": assistant_text},
             ]
         )
+
+    def add_message(
+        self,
+        key: str,
+        role: str,
+        content: str,
+        *,
+        when: datetime | None = None,
+    ) -> None:
+        """追加一条单独的消息，用于群聊中未触发回复的消息。"""
+        if role not in ("user", "assistant"):
+            raise ValueError("role 必须是 user 或 assistant")
+
+        moment = when or datetime.now(UTC)
+        if moment.tzinfo is None:
+            moment = moment.replace(tzinfo=UTC8)
+        created_at = moment.astimezone(UTC).strftime("%Y-%m-%d %H:%M:%S")
+
+        with self._conn:
+            self._conn.execute(
+                "INSERT INTO messages "
+                "(session_key, role, content, created_at) "
+                "VALUES (?, ?, ?, ?)",
+                (key, role, content, created_at),
+            )
+        self._messages.setdefault(key, []).append(
+            {"role": role, "content": content}
+        )
+
+    def add_group_message(
+        self,
+        bot_id: int,
+        group_id: int,
+        role: str,
+        content: str,
+        *,
+        sender_id: int | None = None,
+        sender_name: str = "",
+        when: datetime | None = None,
+    ) -> int:
+        """追加一条群聊消息，保留发送者 QQ 和昵称。"""
+        if role not in ("user", "assistant"):
+            raise ValueError("role 必须是 user 或 assistant")
+
+        moment = when or datetime.now(UTC)
+        if moment.tzinfo is None:
+            moment = moment.replace(tzinfo=UTC8)
+        created_at = moment.astimezone(UTC).strftime("%Y-%m-%d %H:%M:%S")
+
+        with self._conn:
+            cursor = self._conn.execute(
+                "INSERT INTO group_messages "
+                "(bot_id, group_id, sender_id, sender_name, role, "
+                "content, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    bot_id,
+                    group_id,
+                    sender_id,
+                    sender_name,
+                    role,
+                    content,
+                    created_at,
+                ),
+            )
+        return int(cursor.lastrowid)
+
+    def build_group_messages(
+        self,
+        bot_id: int,
+        group_id: int,
+        limit: int = 50,
+    ) -> list[ChatMessage]:
+        """加载群聊最近消息，并把发送者 QQ/昵称拼进 user 内容。"""
+        if limit <= 0:
+            return []
+        rows = self._conn.execute(
+            "SELECT role, sender_id, sender_name, content "
+            "FROM group_messages "
+            "WHERE bot_id = ? AND group_id = ? "
+            "ORDER BY id DESC LIMIT ?",
+            (bot_id, group_id, limit),
+        ).fetchall()
+
+        messages: list[ChatMessage] = []
+        for role, sender_id, sender_name, content in reversed(rows):
+            if role == "user":
+                name = sender_name or (
+                    str(sender_id) if sender_id is not None else "未知成员"
+                )
+                label = (
+                    f"{name}({sender_id})"
+                    if sender_id is not None
+                    else name
+                )
+                content = f"{label}：{content}"
+            messages.append(
+                cast(ChatMessage, {"role": role, "content": content})
+            )
+        return messages
+
+    def clear_group_context(self, bot_id: int, group_id: int) -> None:
+        with self._conn:
+            self._conn.execute(
+                "DELETE FROM group_messages "
+                "WHERE bot_id = ? AND group_id = ?",
+                (bot_id, group_id),
+            )
 
     def get_summary(self, key: str) -> str:
         return self._summaries.get(key, "")
@@ -310,6 +531,140 @@ class ConversationStore:
             cursor = self._conn.execute(
                 "DELETE FROM memories WHERE id = ? AND session_key = ?",
                 (memory_id, key),
+            )
+        return cursor.rowcount > 0
+
+    def add_group_memory(
+        self,
+        bot_id: int,
+        group_id: int,
+        scope: str,
+        content: str,
+        *,
+        user_id: int = 0,
+        category: str = "fact",
+    ) -> int:
+        """保存群共享记忆或某个群成员的记忆。"""
+        if scope not in ("group", "member"):
+            raise ValueError("scope 必须是 group 或 member")
+        if scope == "member" and not user_id:
+            raise ValueError("成员记忆必须提供 user_id")
+        if scope == "group":
+            user_id = 0
+
+        content = content.strip()
+        if not content:
+            raise ValueError("记忆内容不能为空")
+
+        now = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
+        with self._conn:
+            self._conn.execute(
+                "INSERT INTO group_memories "
+                "(bot_id, group_id, scope, user_id, category, content, "
+                "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(bot_id, group_id, scope, user_id, content) "
+                "DO UPDATE SET category = excluded.category, "
+                "updated_at = excluded.updated_at",
+                (
+                    bot_id,
+                    group_id,
+                    scope,
+                    user_id,
+                    category,
+                    content,
+                    now,
+                    now,
+                ),
+            )
+            row = self._conn.execute(
+                "SELECT id FROM group_memories "
+                "WHERE bot_id = ? AND group_id = ? AND scope = ? "
+                "AND user_id = ? AND content = ?",
+                (bot_id, group_id, scope, user_id, content),
+            ).fetchone()
+        return int(row[0]) if row else 0
+
+    def list_group_memories(
+        self,
+        bot_id: int,
+        group_id: int,
+        scope: str,
+        *,
+        user_id: int = 0,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        limit = max(1, min(int(limit), 50))
+        if scope == "group":
+            user_id = 0
+        rows = self._conn.execute(
+            "SELECT id, category, content FROM group_memories "
+            "WHERE bot_id = ? AND group_id = ? AND scope = ? "
+            "AND user_id = ? "
+            "ORDER BY updated_at DESC, id DESC LIMIT ?",
+            (bot_id, group_id, scope, user_id, limit),
+        ).fetchall()
+        return [
+            {"id": int(memory_id), "category": category, "content": content}
+            for memory_id, category, content in rows
+        ]
+
+    def search_group_memories(
+        self,
+        bot_id: int,
+        group_id: int,
+        scope: str,
+        *,
+        user_id: int = 0,
+        keyword: str | None = None,
+        limit: int = 10,
+    ) -> list[dict[str, Any]]:
+        limit = max(1, min(int(limit), 50))
+        if scope == "group":
+            user_id = 0
+        clauses = [
+            "bot_id = ?",
+            "group_id = ?",
+            "scope = ?",
+            "user_id = ?",
+        ]
+        params: list[Any] = [bot_id, group_id, scope, user_id]
+        if keyword:
+            escaped = (
+                keyword.replace("\\", "\\\\")
+                .replace("%", "\\%")
+                .replace("_", "\\_")
+            )
+            clauses.append("content LIKE ? ESCAPE '\\'")
+            params.append(f"%{escaped}%")
+        params.append(limit)
+        rows = self._conn.execute(
+            "SELECT id, category, content FROM group_memories "
+            f"WHERE {' AND '.join(clauses)} "
+            "ORDER BY updated_at DESC, id DESC LIMIT ?",
+            params,
+        ).fetchall()
+        return [
+            {"id": int(memory_id), "category": category, "content": content}
+            for memory_id, category, content in rows
+        ]
+
+    def delete_group_memory(
+        self,
+        bot_id: int,
+        group_id: int,
+        scope: str,
+        memory_id: int,
+        *,
+        user_id: int = 0,
+    ) -> bool:
+        if scope == "group":
+            user_id = 0
+        with self._conn:
+            cursor = self._conn.execute(
+                "DELETE FROM group_memories "
+                "WHERE id = ? AND bot_id = ? AND group_id = ? "
+                "AND scope = ? AND user_id = ?",
+                (memory_id, bot_id, group_id, scope, user_id),
             )
         return cursor.rowcount > 0
 

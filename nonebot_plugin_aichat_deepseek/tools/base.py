@@ -11,7 +11,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any, TypeAlias
 
-from ..history import ConversationStore
+from ..history import STICKER_LIBRARY_KEY, ConversationStore
 
 MAX_LIST_LIMIT = 20
 MAX_CONTENT_CHARS = 600
@@ -47,6 +47,40 @@ class ToolContext:
     get_bot: Callable[[str], Any]
     search_web: SearchCallable | None = None
     get_scheduler: SchedulerProvider | None = None
+    chat_type: str = "private"
+    bot_id: int | None = None
+    group_id: int | None = None
+    sender_id: int | None = None
+    sender_name: str = ""
+
+
+def group_context(
+    ctx: ToolContext,
+) -> tuple[int, int] | None:
+    """群聊工具上下文：机器人和群。"""
+    if (
+        ctx.chat_type != "group"
+        or ctx.bot_id is None
+        or ctx.group_id is None
+    ):
+        return None
+    return ctx.bot_id, ctx.group_id
+
+
+def group_scope(
+    ctx: ToolContext,
+) -> tuple[int, int, int] | None:
+    """群聊工具上下文：机器人、群、当前发言人。"""
+    context = group_context(ctx)
+    if context is None or ctx.sender_id is None:
+        return None
+    return context[0], context[1], ctx.sender_id
+
+
+def sticker_scope_key(ctx: ToolContext) -> str:
+    """所有私聊和群聊共用同一个全局表情库。"""
+    del ctx
+    return STICKER_LIBRARY_KEY
 
 
 def make_definition(

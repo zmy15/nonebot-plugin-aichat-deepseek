@@ -9,6 +9,7 @@ from typing import Any, Callable
 
 from nonebot import logger
 
+from ..config import plugin_config
 from ..history import ConversationStore
 from .base import (
     SchedulerProvider,
@@ -20,14 +21,17 @@ from .base import (
 )
 from .cancel_scheduled_task import TOOL as CANCEL_SCHEDULED_TASK_TOOL
 from .clear_user_prompt import TOOL as CLEAR_USER_PROMPT_TOOL
+from .delete_group_memory import TOOL as DELETE_GROUP_MEMORY_TOOL
 from .delete_memory import TOOL as DELETE_MEMORY_TOOL
 from .describe_sticker import TOOL as DESCRIBE_STICKER_TOOL
 from .get_user_prompt import TOOL as GET_USER_PROMPT_TOOL
 from .list_scheduled_tasks import TOOL as LIST_SCHEDULED_TASKS_TOOL
 from .poke_user import TOOL as POKE_USER_TOOL
 from .query_history import TOOL as QUERY_HISTORY_TOOL
-from .schedule_task import TOOL as SCHEDULE_TASK_TOOL
+from .save_group_memory import TOOL as SAVE_GROUP_MEMORY_TOOL
 from .save_memory import TOOL as SAVE_MEMORY_TOOL
+from .schedule_task import TOOL as SCHEDULE_TASK_TOOL
+from .search_group_memory import TOOL as SEARCH_GROUP_MEMORY_TOOL
 from .search_memory import TOOL as SEARCH_MEMORY_TOOL
 from .search_stickers import TOOL as SEARCH_STICKERS_TOOL
 from .send_sticker import TOOL as SEND_STICKER_TOOL
@@ -54,7 +58,15 @@ ALL_TOOLS: tuple[Tool, ...] = (
     SEND_STICKER_TOOL,
 )
 
-TOOL_BY_NAME: dict[str, Tool] = {tool.name: tool for tool in ALL_TOOLS}
+GROUP_TOOLS: tuple[Tool, ...] = (
+    SAVE_GROUP_MEMORY_TOOL,
+    SEARCH_GROUP_MEMORY_TOOL,
+    DELETE_GROUP_MEMORY_TOOL,
+)
+
+TOOL_BY_NAME: dict[str, Tool] = {
+    tool.name: tool for tool in (*ALL_TOOLS, *GROUP_TOOLS)
+}
 
 
 def build_tool_definitions(
@@ -93,6 +105,26 @@ TOOL_DEFINITIONS = build_tool_definitions(
 )
 
 
+def build_group_tool_definitions() -> list[dict[str, Any]]:
+    """群聊开放记忆、戳一戳、表情包和联网搜索工具。"""
+    groups: set[str] = set()
+    if plugin_config.deepseek_memory_enabled:
+        groups.update({"memory", "group_memory"})
+    if plugin_config.deepseek_poke_enabled:
+        groups.add("poke")
+    if plugin_config.deepseek_sticker_enabled:
+        groups.add("stickers")
+    if plugin_config.deepseek_search_enabled:
+        groups.add("search")
+    if not groups:
+        return []
+    return [
+        tool.definition
+        for tool in (*ALL_TOOLS, *GROUP_TOOLS)
+        if tool.group in groups
+    ]
+
+
 async def execute_tool(
     name: str,
     arguments: str | dict[str, Any],
@@ -102,6 +134,11 @@ async def execute_tool(
     get_bot: Callable[[str], Any],
     search_web: SearchCallable | None = None,
     get_scheduler: SchedulerProvider | None = None,
+    chat_type: str = "private",
+    bot_id: int | None = None,
+    group_id: int | None = None,
+    sender_id: int | None = None,
+    sender_name: str = "",
 ) -> str:
     """执行模型请求的工具，返回给模型的字符串结果。"""
     started = time.perf_counter()
@@ -139,6 +176,11 @@ async def execute_tool(
         get_bot=get_bot,
         search_web=search_web,
         get_scheduler=get_scheduler,
+        chat_type=chat_type,
+        bot_id=bot_id,
+        group_id=group_id,
+        sender_id=sender_id,
+        sender_name=sender_name,
     )
     try:
         result = tool.handler(args, context)

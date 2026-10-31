@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import asyncio
 import random
+import re
+import time
 import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import datetime
@@ -14,7 +16,12 @@ from typing import Any
 
 from nonebot import get_driver, logger, on_command, on_message, on_notice
 from nonebot.adapters import Event
-from nonebot.adapters.onebot.v11 import Bot, PokeNotifyEvent, PrivateMessageEvent
+from nonebot.adapters.onebot.v11 import (
+    Bot,
+    GroupMessageEvent,
+    PokeNotifyEvent,
+    PrivateMessageEvent,
+)
 from nonebot.matcher import Matcher
 from nonebot.rule import Rule
 
@@ -22,7 +29,11 @@ from .aggregator import MessageAggregator
 from .config import plugin_config
 from .data_source import ChatMessage, DeepSeekClient, DeepSeekError
 from .formatting import split_reply, strip_markdown
-from .history import UTC8, ConversationStore
+from .history import (
+    STICKER_LIBRARY_KEY,
+    UTC8,
+    ConversationStore,
+)
 from .images import ImageError, fetch_image
 from .scheduled_tasks import (
     cancel_followup,
@@ -36,6 +47,7 @@ from .stickers import (
 )
 from .tools import (
     MEMORY_CATEGORY_LABELS,
+    build_group_tool_definitions,
     build_tool_definitions,
     execute_tool,
 )
@@ -105,9 +117,83 @@ def _is_private_poke(event: Event) -> bool:
 private_poke = on_notice(rule=Rule(_is_private_poke), priority=5, block=True)
 
 
+def _is_group_poke(event: Event) -> bool:
+    """群聊里戳机器人本人的事件。"""
+    return (
+        plugin_config.deepseek_group_enabled
+        and plugin_config.deepseek_poke_enabled
+        and isinstance(event, PokeNotifyEvent)
+        and event.group_id is not None
+        and _group_allowed(event.group_id)
+        and event.target_id == event.self_id
+        and event.user_id != event.self_id
+    )
+
+
+group_poke = on_notice(rule=Rule(_is_group_poke), priority=5, block=True)
+
+
 def _session_key(event: PrivateMessageEvent | PokeNotifyEvent) -> str:
     """同一机器人下按用户隔离上下文。"""
     return f"{event.self_id}:{event.user_id}"
+
+
+_GROUP_LAST_REPLY: dict[str, float] = {}
+
+
+def _group_ids() -> set[int] | None:
+    """空配置表示不限制群号，返回 ``None``。"""
+    raw = plugin_config.deepseek_group_ids.strip()
+    if not raw:
+        return None
+    return {int(part) for part in re.findall(r"\d+", raw)}
+
+
+def _group_session_key(event: GroupMessageEvent) -> str:
+    return f"group:{event.self_id}:{event.group_id}"
+
+
+def _group_allowed(group_id: int) -> bool:
+    ids = _group_ids()
+    return ids is None or group_id in ids
+
+
+def _is_group_message(event: Event) -> bool:
+    return (
+        plugin_config.deepseek_group_enabled
+        and isinstance(event, GroupMessageEvent)
+        and _group_allowed(event.group_id)
+    )
+
+
+group_chat = on_message(rule=Rule(_is_group_message), priority=100, block=True)
+
+
+def _has_at_bot(event: GroupMessageEvent) -> bool:
+    return any(
+        segment.type == "at"
+        and str(segment.data.get("qq")) == str(event.self_id)
+        for segment in event.message
+    )
+
+
+def _group_sender_name(event: GroupMessageEvent) -> str:
+    sender = event.sender
+    return sender.card or sender.nickname or str(event.user_id)
+
+
+def _mark_group_reply(session_key: str) -> None:
+    _GROUP_LAST_REPLY[session_key] = time.monotonic()
+
+
+def _should_group_reply(session_key: str) -> bool:
+    probability = plugin_config.deepseek_group_reply_probability
+    if probability <= 0:
+        return False
+    last = _GROUP_LAST_REPLY.get(session_key, 0.0)
+    if time.monotonic() - last < plugin_config.deepseek_group_reply_cooldown:
+        return False
+    return random.random() < probability
 
 
 def _starts_with_command(text: str) -> bool:
@@ -284,10 +370,28 @@ def _maybe_schedule_followup(session_key: str, answer: str) -> None:
         logger.exception("安排未回复追问失败")
 
 
+def _memory_lines(memories: list[dict[str, Any]]) -> list[str]:
+    lines: list[str] = []
+    used_chars = 0
+    for memory in memories:
+        label = MEMORY_CATEGORY_LABELS.get(
+            memory["category"], memory["category"]
+        )
+        line = f"- #{memory['id']} [{label}] {memory['content']}"
+        max_chars = plugin_config.deepseek_memory_max_chars
+        if used_chars + len(line) + 1 > max_chars:
+            break
+        lines.append(line)
+        used_chars += len(line) + 1
+    return lines
+
+
 def _build_system_prompt(
     summary: str = "",
     memories: list[dict[str, Any]] | None = None,
     user_prompt: str = "",
+    *,
+    group: bool = False,
 ) -> str:
     """在用户配置的人设之后追加输出约束、自定义指令、摘要和长期记忆。"""
     persona = plugin_config.deepseek_system_prompt.strip()
@@ -301,6 +405,58 @@ def _build_system_prompt(
         f"3. 多条消息之间用 {delimiter} 分隔；"
         "不要在回复中解释或提到分隔符。\n"
     )
+    if group:
+        today = datetime.now(UTC8).strftime("%Y-%m-%d")
+        rules += (
+            f"\n群聊规则：当前日期是 {today}（UTC+8）。"
+            "你会看到“昵称(QQ)：内容”格式的群消息；"
+            "像群成员一样自然地参与聊天，不要复述所有人的话，"
+            "不要假装知道未提供的信息；需要称呼某人时直接写昵称。"
+        )
+        if (
+            plugin_config.deepseek_tools_enabled
+            and plugin_config.deepseek_memory_enabled
+        ):
+            rules += (
+                "\n群聊记忆：当前发言人的个人信息用 save_user_memory 保存，"
+                "整个群共享的信息用 save_group_memory 保存；"
+                "需要回忆时用 search_user_memory 或 search_group_memory；"
+                "删除时用 delete_user_memory 或 delete_group_memory。"
+                "不要把单个成员的私人信息写进群聊记忆。"
+            )
+        if (
+            plugin_config.deepseek_tools_enabled
+            and plugin_config.deepseek_search_enabled
+        ):
+            rules += (
+                "\n群里聊到实时信息、新闻、价格、天气或你不确定的内容时，"
+                "可以调用 web_search 查询，不要凭记忆编造。"
+            )
+        if (
+            plugin_config.deepseek_tools_enabled
+            and plugin_config.deepseek_poke_enabled
+        ):
+            rules += (
+                "\n群里可以用 poke_user 戳一戳当前发言人，"
+                "表达提醒、调侃或互动；不要连续频繁戳同一个人。"
+            )
+        if (
+            plugin_config.deepseek_tools_enabled
+            and plugin_config.deepseek_sticker_enabled
+        ):
+            rules += (
+                "\n所有私聊和群聊共用同一个表情库，不按用户或群隔离。"
+                "本轮收到表情包时，消息里会给出表情包 ID；"
+                "如果用户说明了含义，调用 describe_sticker 记录，"
+                "没有说明就不要凭空猜测。聊天中可以根据气氛主动调用 "
+                "send_sticker 发送合适的表情包；不确定有哪些可选时，"
+                "先调用 search_stickers 查看。"
+            )
+        prompt = f"{persona}\n\n{rules}" if persona else rules
+        if summary:
+            prompt = f"{prompt}\n\n【历史对话摘要】\n{summary}"
+        return prompt
+
     if plugin_config.deepseek_tools_enabled:
         now = datetime.now(UTC8).strftime("%Y-%m-%d")
         rules += (
@@ -411,17 +567,7 @@ def _build_system_prompt(
         prompt = f"{prompt}\n\n【历史对话摘要】\n{summary}"
 
     if memories:
-        lines: list[str] = []
-        used_chars = 0
-        for memory in memories:
-            label = MEMORY_CATEGORY_LABELS.get(
-                memory["category"], memory["category"]
-            )
-            line = f"- #{memory['id']} [{label}] {memory['content']}"
-            if used_chars + len(line) + 1 > plugin_config.deepseek_memory_max_chars:
-                break
-            lines.append(line)
-            used_chars += len(line) + 1
+        lines = _memory_lines(memories)
         if lines:
             prompt = f"{prompt}\n\n【用户长期记忆】\n" + "\n".join(lines)
 
@@ -431,31 +577,90 @@ def _build_system_prompt(
 def _build_request_messages(
     session_key: str,
     user_content: str | list[dict[str, Any]],
+    *,
+    group: bool = False,
+    history_limit: int | None = None,
 ) -> list[dict[str, Any]]:
     messages: list[dict[str, Any]] = [
-        dict(message) for message in store.build_messages(session_key)
+        dict(message)
+        for message in store.build_messages(
+            session_key, limit=history_limit
+        )
     ]
     summary = store.get_summary(session_key)
     memories: list[dict[str, Any]] = []
-    if plugin_config.deepseek_memory_enabled:
+    if plugin_config.deepseek_memory_enabled and not group:
         memories = store.list_memories(
             session_key,
             limit=plugin_config.deepseek_memory_max_items,
         )
     user_prompt = (
         store.get_user_prompt(session_key)
-        if plugin_config.deepseek_custom_prompt_enabled
+        if plugin_config.deepseek_custom_prompt_enabled and not group
         else ""
     )
     messages.insert(
         0,
         {
             "role": "system",
-            "content": _build_system_prompt(summary, memories, user_prompt),
+            "content": _build_system_prompt(
+                summary,
+                memories,
+                user_prompt,
+                group=group,
+            ),
         },
     )
     messages.append({"role": "user", "content": user_content})
     return messages
+
+
+def _build_group_request_messages(
+    bot_id: int,
+    group_id: int,
+    sender_id: int,
+    sender_name: str,
+    history_limit: int,
+) -> list[dict[str, Any]]:
+    messages: list[dict[str, Any]] = [
+        dict(message)
+        for message in store.build_group_messages(
+            bot_id,
+            group_id,
+            limit=history_limit,
+        )
+    ]
+    system = _build_system_prompt(group=True)
+
+    if plugin_config.deepseek_memory_enabled:
+        group_memories = store.list_group_memories(
+            bot_id,
+            group_id,
+            "group",
+            limit=plugin_config.deepseek_memory_max_items,
+        )
+        group_lines = _memory_lines(group_memories)
+        if group_lines:
+            system = (
+                f"{system}\n\n【群聊记忆】\n" + "\n".join(group_lines)
+            )
+
+        member_memories = store.list_group_memories(
+            bot_id,
+            group_id,
+            "member",
+            user_id=sender_id,
+            limit=plugin_config.deepseek_memory_max_items,
+        )
+        member_lines = _memory_lines(member_memories)
+        if member_lines:
+            label = f"{sender_name}({sender_id})"
+            system = (
+                f"{system}\n\n【当前成员记忆：{label}】\n"
+                + "\n".join(member_lines)
+            )
+
+    return [{"role": "system", "content": system}, *messages]
 
 
 def _build_summary_messages(
@@ -525,6 +730,9 @@ async def _generate_reply_locked(
     images: Sequence[Mapping[str, Any]] | None = None,
     usage: dict[str, int] | None = None,
     history_user_text: str | None = None,
+    *,
+    group: bool = False,
+    history_limit: int | None = None,
 ) -> str:
     usage_total = usage if usage is not None else {}
 
@@ -562,7 +770,9 @@ async def _generate_reply_locked(
                     continue
                 try:
                     sticker_records.append(
-                        save_sticker_payload(store, session_key, payload)
+                        save_sticker_payload(
+                            store, STICKER_LIBRARY_KEY, payload
+                        )
                     )
                 except Exception:
                     logger.exception("保存表情包失败，跳过本次收藏")
@@ -595,7 +805,12 @@ async def _generate_reply_locked(
         user_content.extend(
             {"type": "file", "file_id": file_id} for file_id in file_ids
         )
-        messages = _build_request_messages(session_key, user_content)
+        messages = _build_request_messages(
+            session_key,
+            user_content,
+            group=group,
+            history_limit=history_limit,
+        )
 
         image_count = len(payloads) - len(sticker_records)
         markers: list[str] = []
@@ -608,12 +823,17 @@ async def _generate_reply_locked(
         marker = "".join(markers)
         history_text = f"{text}\n{marker}".strip() if text else marker
     else:
-        messages = _build_request_messages(session_key, text)
+        messages = _build_request_messages(
+            session_key,
+            text,
+            group=group,
+            history_limit=history_limit,
+        )
 
     if history_user_text is not None:
         history_text = history_user_text
 
-    if plugin_config.deepseek_tools_enabled:
+    if plugin_config.deepseek_tools_enabled and not group:
 
         async def run_tool(name: str, arguments: str) -> str:
             return await execute_tool(
@@ -655,12 +875,75 @@ async def _generate_reply_locked(
     return answer
 
 
+async def _generate_group_reply_locked(
+    bot_id: int,
+    group_id: int,
+    sender_id: int,
+    sender_name: str,
+    session_key: str,
+    usage: dict[str, int] | None = None,
+) -> str:
+    usage_total = usage if usage is not None else {}
+
+    def record_usage(usage_data: Mapping[str, Any]) -> None:
+        _merge_usage(usage_total, usage_data)
+        _log_api_usage(session_key, "group_reply", usage_data)
+
+    messages = _build_group_request_messages(
+        bot_id,
+        group_id,
+        sender_id,
+        sender_name,
+        plugin_config.deepseek_group_history_messages,
+    )
+
+    group_tools = build_group_tool_definitions()
+    if plugin_config.deepseek_tools_enabled and group_tools:
+
+        async def run_tool(name: str, arguments: str) -> str:
+            return await execute_tool(
+                name,
+                arguments,
+                session_key,
+                store,
+                search_web=getattr(client, "search", None),
+                get_scheduler=get_scheduler,
+                chat_type="group",
+                bot_id=bot_id,
+                group_id=group_id,
+                sender_id=sender_id,
+                sender_name=sender_name,
+            )
+
+        answer = await client.chat_with_tools(
+            messages,
+            tools=group_tools,
+            tool_runner=run_tool,
+            max_tool_rounds=plugin_config.deepseek_tool_max_rounds,
+            on_usage=record_usage,
+            session_key=session_key,
+            phase="group_reply",
+        )
+    else:
+        answer = await client.chat(
+            messages,
+            on_usage=record_usage,
+            session_key=session_key,
+            phase="group_reply",
+        )
+
+    store.add_group_message(bot_id, group_id, "assistant", answer)
+    return answer
+
+
 async def generate_reply(
     session_key: str,
     text: str,
     images: Sequence[Mapping[str, Any]] | None = None,
     *,
     history_user_text: str | None = None,
+    group: bool = False,
+    history_limit: int | None = None,
 ) -> str:
     """携带上下文请求模型，成功后把本轮问答写入历史。"""
     async with store.lock(session_key):
@@ -669,6 +952,8 @@ async def generate_reply(
             text,
             images,
             history_user_text=history_user_text,
+            group=group,
+            history_limit=history_limit,
         )
 
 
@@ -680,6 +965,12 @@ async def reply(
     *,
     history_user_text: str | None = None,
     allow_followup: bool = True,
+    group: bool = False,
+    history_limit: int | None = None,
+    bot_id: int | None = None,
+    group_id: int | None = None,
+    sender_id: int | None = None,
+    sender_name: str = "",
 ) -> None:
     """生成回复并发送；出错时回复一条可读的错误提示。"""
     qid = uuid.uuid4().hex[:8]
@@ -696,13 +987,30 @@ async def reply(
 
     async with store.lock(session_key):
         try:
-            answer = await _generate_reply_locked(
-                session_key,
-                text,
-                images,
-                usage,
-                history_user_text=history_user_text,
-            )
+            if group:
+                if (
+                    bot_id is None
+                    or group_id is None
+                    or sender_id is None
+                ):
+                    raise ValueError("群聊回复缺少必要的会话信息")
+                answer = await _generate_group_reply_locked(
+                    bot_id,
+                    group_id,
+                    sender_id,
+                    sender_name,
+                    session_key,
+                    usage,
+                )
+            else:
+                answer = await _generate_reply_locked(
+                    session_key,
+                    text,
+                    images,
+                    usage,
+                    history_user_text=history_user_text,
+                    history_limit=history_limit,
+                )
         except ImageError as exc:
             logger.warning(f"图片处理失败：{exc}")
             _log_reply(qid, session_key, False, "image_error", usage)
@@ -774,13 +1082,14 @@ async def reply(
             len(messages),
         )
 
-        if allow_followup:
+        if allow_followup and not group:
             _maybe_schedule_followup(session_key, answer)
 
-        try:
-            await compress_if_needed(session_key)
-        except Exception:
-            logger.exception("上下文压缩处理失败")
+        if not group:
+            try:
+                await compress_if_needed(session_key)
+            except Exception:
+                logger.exception("上下文压缩处理失败")
 
 
 async def proactive_reply(
@@ -907,6 +1216,45 @@ async def process_private_poke(event: PokeNotifyEvent, send: Sender) -> None:
     await reply(session_key, prompt, send)
 
 
+async def process_group_poke(
+    event: PokeNotifyEvent, send: Sender
+) -> None:
+    if event.group_id is None:
+        return
+    session_key = f"group:{event.self_id}:{event.group_id}"
+    sender_name = f"用户{event.user_id}"
+    store.add_group_message(
+        event.self_id,
+        event.group_id,
+        "user",
+        "（对方戳了你一下，想引起你的注意）",
+        sender_id=event.user_id,
+        sender_name=sender_name,
+    )
+    logger.info(
+        f"[group] poke session={session_key} "
+        f"target={event.target_id} user={event.user_id}"
+    )
+    prompt = (
+        POKE_BACK_PROMPT
+        if plugin_config.deepseek_tools_enabled
+        and plugin_config.deepseek_poke_enabled
+        else POKE_PROMPT
+    )
+    await reply(
+        session_key,
+        prompt,
+        send,
+        group=True,
+        history_limit=plugin_config.deepseek_group_history_messages,
+        allow_followup=False,
+        bot_id=event.self_id,
+        group_id=event.group_id,
+        sender_id=event.user_id,
+        sender_name=sender_name,
+    )
+
+
 async def clear_user_context(session_key: str) -> None:
     """清空当前用户的消息、摘要和长期记忆，保留自定义提示词。"""
     await message_aggregator.discard(session_key)
@@ -936,6 +1284,120 @@ clear_context_command = on_command(
 async def handle_clear_context(event: PrivateMessageEvent) -> None:
     await clear_user_context(_session_key(event))
     await clear_context_command.finish("已清空当前用户的全部对话上下文。")
+
+
+def _group_sticker_note(records: list[dict[str, Any]]) -> str:
+    ids = "、".join(f"#{record['id']}" for record in records)
+    note = (
+        f"（本轮收到 {len(records)} 个表情包，"
+        f"已存入全局表情库（私聊和所有群共用）：{ids}。"
+    )
+    if plugin_config.deepseek_tools_enabled:
+        note += (
+            "如果用户说明了含义，调用 describe_sticker 记录；"
+            "没有说明就不要猜。需要发表情包时调用 send_sticker。）"
+        )
+    else:
+        note += "）"
+    return note
+
+
+async def process_group_message(
+    event: GroupMessageEvent, send: Sender
+) -> None:
+    session_key = _group_session_key(event)
+    if event.user_id == event.self_id:
+        return
+
+    text = event.get_plaintext().strip()
+    sender = _group_sender_name(event)
+    to_me = event.to_me or _has_at_bot(event)
+    logger.info(
+        f"[group] incoming session={session_key} user={event.user_id} "
+        f"text_len={len(text)} to_me={str(to_me).lower()} "
+        f"probability={plugin_config.deepseek_group_reply_probability}"
+    )
+
+    if text and _starts_with_command(text):
+        return
+
+    images = [
+        segment for segment in event.message if segment.type == "image"
+    ]
+    sticker_records: list[dict[str, Any]] = []
+    if images and plugin_config.deepseek_sticker_enabled:
+        for segment in images:
+            if (
+                len(sticker_records)
+                >= plugin_config.deepseek_sticker_max_count
+            ):
+                break
+            if not is_sticker_image(segment.data, text):
+                continue
+            try:
+                payload = await fetch_image(
+                    segment.data,
+                    timeout=plugin_config.deepseek_image_timeout,
+                    max_bytes=plugin_config.deepseek_image_max_bytes,
+                )
+                sticker_records.append(
+                    save_sticker_payload(
+                        store,
+                        STICKER_LIBRARY_KEY,
+                        payload,
+                    )
+                )
+            except Exception:
+                logger.exception("群聊表情包保存失败，跳过本次收藏")
+
+    content = text if text else ("[图片]" if images else "[非文本消息]")
+    if sticker_records:
+        content = f"{content}\n{_group_sticker_note(sticker_records)}"
+    elif images and text:
+        content = f"{content}\n（发送了 {len(images)} 张图片）"
+
+    store.add_group_message(
+        event.self_id,
+        event.group_id,
+        "user",
+        content,
+        sender_id=event.user_id,
+        sender_name=sender,
+    )
+
+    if not text and not to_me:
+        return
+
+    if to_me:
+        _mark_group_reply(session_key)
+        await reply(
+            session_key,
+            text,
+            send,
+            group=True,
+            history_limit=plugin_config.deepseek_group_history_messages,
+            allow_followup=False,
+            bot_id=event.self_id,
+            group_id=event.group_id,
+            sender_id=event.user_id,
+            sender_name=sender,
+        )
+        return
+
+    if _should_group_reply(session_key):
+        _mark_group_reply(session_key)
+        await reply(
+            session_key,
+            text,
+            send,
+            group=True,
+            history_limit=plugin_config.deepseek_group_history_messages,
+            allow_followup=False,
+            bot_id=event.self_id,
+            group_id=event.group_id,
+            sender_id=event.user_id,
+            sender_name=sender,
+        )
 
 
 async def process_private_message(event: PrivateMessageEvent, send: Sender) -> None:
@@ -983,6 +1445,30 @@ async def handle_private_chat(event: PrivateMessageEvent, matcher: Matcher) -> N
         await matcher.send(message)
 
     await process_private_message(event, send)
+
+
+@group_chat.handle()
+async def handle_group_chat(bot: Bot, event: GroupMessageEvent) -> None:
+    async def send(message: str) -> None:
+        await bot.call_api(
+            "send_group_msg",
+            group_id=event.group_id,
+            message=message,
+        )
+
+    await process_group_message(event, send)
+
+
+@group_poke.handle()
+async def handle_group_poke(bot: Bot, event: PokeNotifyEvent) -> None:
+    async def send(message: str) -> None:
+        await bot.call_api(
+            "send_group_msg",
+            group_id=event.group_id,
+            message=message,
+        )
+
+    await process_group_poke(event, send)
 
 
 @private_poke.handle()

@@ -872,8 +872,16 @@ async def test_reply_with_sticker_saves_and_notes(
         "deepseek_sticker_dir",
         str(tmp_path / "stickers"),
     )
-    for sticker in chat_module.store.search_stickers("4:4", limit=50):
-        chat_module.store.delete_sticker("4:4", sticker["id"])
+    from nonebot_plugin_aichat_deepseek.history import (
+        STICKER_LIBRARY_KEY,
+    )
+
+    for sticker in chat_module.store.search_stickers(
+        STICKER_LIBRARY_KEY, limit=50
+    ):
+        chat_module.store.delete_sticker(
+            STICKER_LIBRARY_KEY, sticker["id"]
+        )
     chat_module.store.clear("4:4")
 
     sent: list[str] = []
@@ -888,7 +896,7 @@ async def test_reply_with_sticker_saves_and_notes(
         images=[{"sub_type": 1, "url": "https://example.com/s.png"}],
     )
 
-    records = chat_module.store.search_stickers("4:4")
+    records = chat_module.store.search_stickers(STICKER_LIBRARY_KEY)
     assert len(records) == 1
 
     assert fake.messages is not None

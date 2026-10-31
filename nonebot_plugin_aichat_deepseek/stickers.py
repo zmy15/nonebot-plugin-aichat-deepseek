@@ -128,7 +128,20 @@ def build_sticker_prompt_note(records: list[dict[str, Any]]) -> str:
     return note
 
 
-async def _send_image(bot: Any, user_id: int, file_value: str) -> None:
+async def _send_image(
+    bot: Any,
+    user_id: int | None,
+    file_value: str,
+    *,
+    group_id: int | None = None,
+) -> None:
+    if group_id is not None:
+        await bot.call_api(
+            "send_group_msg",
+            group_id=group_id,
+            message=[{"type": "image", "data": {"file": file_value}}],
+        )
+        return
     await bot.call_api(
         "send_private_msg",
         user_id=user_id,
@@ -138,16 +151,23 @@ async def _send_image(bot: Any, user_id: int, file_value: str) -> None:
 
 async def send_sticker_image(
     bot: Any,
-    user_id: int,
+    user_id: int | None,
     file_path: str | Path,
+    *,
+    group_id: int | None = None,
 ) -> str:
-    """发送本地表情包图片，返回实际使用的发送方式。"""
+    """发送本地表情包图片到私聊或群聊，返回实际使用的发送方式。"""
     path = Path(file_path).expanduser()
     if not path.is_file():
         raise StickerError("表情包文件不存在，可能已被移动或删除")
 
     try:
-        await _send_image(bot, user_id, path.resolve().as_uri())
+        await _send_image(
+            bot,
+            user_id,
+            path.resolve().as_uri(),
+            group_id=group_id,
+        )
         return "file_uri"
     except Exception as first_error:
         logger.warning(
@@ -161,6 +181,7 @@ async def send_sticker_image(
             bot,
             user_id,
             f"base64://{base64.b64encode(data).decode()}",
+            group_id=group_id,
         )
         return "base64"
     except Exception as second_error:

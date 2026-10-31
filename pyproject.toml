@@ -1,7 +1,7 @@
 [project]
 name = "nonebot-plugin-aichat-deepseek"
-version = "0.17.0"
-description = "基于 DeepSeek API 的 NoneBot2 私聊对话插件"
+version = "0.18.0"
+description = "基于 DeepSeek API 的 NoneBot2 私聊/群聊对话插件"
 readme = "README.md"
 license = { text = "MIT" }
 authors = [{ name = "zmy15", email = "109537161+zmy15@users.noreply.github.com" }]

@@ -135,6 +135,75 @@ async def test_poke_tool_handles_missing_bot(
     store.close()
 
 
+def test_group_poke_rule() -> None:
+    from nonebot_plugin_aichat_deepseek import chat
+
+    assert chat._is_group_poke(make_poke(group_id=123)) is True
+    assert chat._is_group_poke(make_poke(group_id=123, target_id=3)) is False
+    assert chat._is_group_poke(make_poke(group_id=None)) is False
+    assert chat._is_group_poke(make_poke(group_id=123, user_id=1)) is False
+
+
+async def test_process_group_poke_replies(monkeypatch) -> None:
+    from nonebot_plugin_aichat_deepseek import chat
+
+    chat.store.clear_group_context(1, 123)
+    captured: dict = {}
+
+    async def fake_reply(session_key, text, send, images=None, **kwargs):
+        captured["session_key"] = session_key
+        captured["text"] = text
+        captured["kwargs"] = kwargs
+
+    monkeypatch.setattr(chat, "reply", fake_reply)
+
+    async def send(message: str) -> None:
+        pass
+
+    await chat.process_group_poke(make_poke(group_id=123), send)
+
+    assert captured["session_key"] == "group:1:123"
+    assert captured["kwargs"]["group"] is True
+    assert captured["kwargs"]["sender_id"] == 2
+    history = chat.store.build_group_messages(1, 123)
+    assert history[0]["content"].startswith("用户2(2)：")
+
+
+async def test_group_poke_tool_calls_send_poke(
+    tools_mod, store_cls, monkeypatch
+) -> None:
+    calls: list[tuple[str, dict]] = []
+
+    class FakeBot:
+        async def call_api(self, api: str, **kwargs) -> dict:
+            calls.append((api, kwargs))
+            return {}
+
+    monkeypatch.setattr(tools_mod, "get_bot", lambda self_id: FakeBot())
+    store = store_cls()
+
+    raw = await tools_mod.execute_tool(
+        tools_mod.TOOL_POKE_USER,
+        "{}",
+        "group:1:123",
+        store,
+        chat_type="group",
+        bot_id=1,
+        group_id=123,
+        sender_id=2,
+        sender_name="小明",
+    )
+    data = json.loads(raw)
+
+    assert data["poked"] is True
+    assert data["api"] == "send_poke"
+    assert data["group_id"] == 123
+    assert calls == [
+        ("send_poke", {"group_id": 123, "user_id": 2})
+    ]
+    store.close()
+
+
 def test_poke_tool_definition(tools_mod) -> None:
     names = {
         tool["function"]["name"]

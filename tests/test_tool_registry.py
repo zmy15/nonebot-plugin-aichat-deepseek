@@ -25,7 +25,12 @@ def test_each_tool_is_self_contained(tools_mod) -> None:
         "send_sticker",
     ]
     assert len(names) == len(set(names))
-    assert set(names) == set(TOOL_BY_NAME)
+    assert set(names) <= set(TOOL_BY_NAME)
+    assert {
+        "save_group_memory",
+        "search_group_memory",
+        "delete_group_memory",
+    } <= set(TOOL_BY_NAME)
 
     for tool in ALL_TOOLS:
         assert tool.definition["function"]["name"] == tool.name

@@ -110,6 +110,37 @@ def test_sticker_search_update_and_usage(store_cls, tmp_path) -> None:
     store.close()
 
 
+def test_stickers_migrate_to_global(
+    store_cls, tmp_path
+) -> None:
+    from nonebot_plugin_aichat_deepseek.history import (
+        STICKER_LIBRARY_KEY,
+    )
+
+    db_path = tmp_path / "chat.db"
+    store = store_cls(db_path)
+    first = store.add_sticker(
+        "1:2",
+        "a" * 64,
+        tmp_path / "a.png",
+        description="无语",
+    )
+    store.record_sticker_used("1:2", first["id"])
+    store.add_sticker(
+        "1:3", "a" * 64, tmp_path / "b.png", description=""
+    )
+    store.close()
+
+    loaded = store_cls(db_path)
+    rows = loaded.search_stickers(STICKER_LIBRARY_KEY)
+    assert len(rows) == 1
+    assert rows[0]["description"] == "无语"
+    assert rows[0]["use_count"] == 1
+    assert loaded.search_stickers("1:2") == []
+    assert loaded.search_stickers("1:3") == []
+    loaded.close()
+
+
 async def test_send_sticker_image_falls_back_to_base64(
     stickers_mod, tmp_path
 ) -> None:
@@ -137,6 +168,31 @@ async def test_send_sticker_image_falls_back_to_base64(
     assert bot.calls[1][1]["message"][0]["data"]["file"].startswith(
         "base64://"
     )
+
+
+async def test_send_sticker_image_to_group(
+    stickers_mod, tmp_path
+) -> None:
+    class FakeBot:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict]] = []
+
+        async def call_api(self, api: str, **kwargs):
+            self.calls.append((api, kwargs))
+            return {}
+
+    path = tmp_path / "sticker.png"
+    path.write_bytes(PNG)
+    bot = FakeBot()
+
+    method = await stickers_mod.send_sticker_image(
+        bot, None, path, group_id=123
+    )
+
+    assert method == "file_uri"
+    assert bot.calls[0][0] == "send_group_msg"
+    assert bot.calls[0][1]["group_id"] == 123
+    assert bot.calls[0][1]["message"][0]["type"] == "image"
 
 
 async def test_send_sticker_image_success_and_missing_file(

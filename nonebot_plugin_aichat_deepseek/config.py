@@ -26,6 +26,16 @@ class Config(BaseModel):
     # 数据存储（SQLite）。相对路径基于机器人启动目录
     deepseek_db_path: str = "data/nonebot_plugin_aichat_deepseek/chat.db"
 
+    # 群聊：只处理指定群，@ 必回，非 @ 按概率随机参与
+    deepseek_group_enabled: bool = True
+    # 群号，支持逗号/空格分隔，例如 123456 或 [123456, 789012]
+    deepseek_group_ids: str = ""
+    deepseek_group_reply_probability: float = Field(
+        default=0.05, ge=0, le=1
+    )
+    deepseek_group_reply_cooldown: float = Field(default=60.0, ge=0)
+    deepseek_group_history_messages: int = Field(default=50, ge=1)
+
     # 工具调用
     deepseek_tools_enabled: bool = True
     deepseek_tool_max_rounds: int = Field(default=3, ge=1)
