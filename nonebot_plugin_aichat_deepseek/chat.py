@@ -17,6 +17,7 @@ from nonebot.adapters.onebot.v11 import PrivateMessageEvent
 from nonebot.matcher import Matcher
 from nonebot.rule import Rule
 
+from .aggregator import MessageAggregator
 from .config import plugin_config
 from .data_source import ChatMessage, DeepSeekClient, DeepSeekError
 from .formatting import split_reply, strip_markdown
@@ -33,6 +34,15 @@ Sender = Callable[[str], Awaitable[None]]
 MISSING_API_KEY_TIP = "还没有配置 DEEPSEEK_API_KEY，请先在 .env 中填写后再试。"
 IMAGE_DISABLED_TIP = "图片理解功能还没有开启。"
 EMPTY_REPLY_TIP = "……"
+COMPLETENESS_SYSTEM_PROMPT = (
+    "你是一个消息完整性判断器。用户可能把同一句话拆成多条发送。\n"
+    "下面会给出最近对话和当前拼接后的用户消息。"
+    "请结合上下文判断当前消息是否已经表达完整、可以正常回答。\n"
+    "如果明显还没说完，例如只有开场白、句子中断、以“然后/因为/我想问”等结尾，"
+    "只输出 INCOMPLETE。\n"
+    "否则只输出 COMPLETE。\n"
+    "不要回答用户的问题，不要解释。"
+)
 SUMMARY_SYSTEM_PROMPT = (
     "你是一个对话摘要助手。请把用户与 AI 的对话压缩成一段简洁的中文摘要，"
     "保留关键事实、用户偏好、约定和未完成事项；不要编造，不要使用 Markdown。"
@@ -83,6 +93,15 @@ def next_reply_interval() -> float:
     if interval <= 0 and jitter <= 0:
         return 0.0
     return max(0.0, interval + random.uniform(-jitter, jitter))
+
+
+def next_initial_delay() -> float:
+    """首次回复前的随机延迟，模拟真人看到消息后停顿一下。"""
+    delay = plugin_config.deepseek_reply_delay
+    jitter = plugin_config.deepseek_reply_delay_jitter
+    if delay <= 0 and jitter <= 0:
+        return 0.0
+    return max(0.0, delay + random.uniform(-jitter, jitter))
 
 
 def _format_error(exc: DeepSeekError) -> str:
@@ -358,6 +377,10 @@ async def reply(
         if not messages:
             messages = [EMPTY_REPLY_TIP]
 
+        initial_delay = next_initial_delay()
+        if initial_delay > 0:
+            await asyncio.sleep(initial_delay)
+
         for index, message in enumerate(messages):
             if index:
                 delay = next_reply_interval()
@@ -369,6 +392,57 @@ async def reply(
             await compress_if_needed(session_key)
         except Exception:
             logger.exception("上下文压缩处理失败")
+
+
+async def _is_message_complete(
+    session_key: str,
+    text: str,
+    images: list[dict[str, Any]],
+) -> bool:
+    """判断聚合后的消息是否已经完整，可以交给正式对话处理。"""
+    if images:
+        return True
+    if not text.strip():
+        return True
+    if not plugin_config.deepseek_completeness_check or not client.configured:
+        return True
+
+    try:
+        messages: list[dict[str, Any]] = [
+            {
+                "role": "system",
+                "content": COMPLETENESS_SYSTEM_PROMPT,
+            }
+        ]
+        messages.extend(store.build_messages(session_key)[-6:])
+        messages.append({"role": "user", "content": text})
+        answer = await client.chat(messages)
+    except Exception:
+        logger.exception("消息完整性判断失败，按完整处理")
+        return True
+
+    upper = answer.strip().upper()
+    if "INCOMPLETE" in upper or "不完整" in answer:
+        logger.debug(f"消息不完整，等待用户继续：{session_key}")
+        return False
+    return True
+
+
+async def _handle_aggregated(
+    session_key: str,
+    text: str,
+    images: list[dict[str, Any]],
+    send: Sender,
+) -> None:
+    await reply(session_key, text, send, images=images)
+
+
+message_aggregator = MessageAggregator(
+    debounce_seconds=plugin_config.deepseek_debounce_seconds,
+    debounce_jitter=plugin_config.deepseek_debounce_jitter,
+    is_complete=_is_message_complete,
+    handler=_handle_aggregated,
+)
 
 
 async def process_private_message(event: PrivateMessageEvent, send: Sender) -> None:
@@ -389,7 +463,12 @@ async def process_private_message(event: PrivateMessageEvent, send: Sender) -> N
         return
     if text and _starts_with_command(text):
         return
-    await reply(_session_key(event), text, send, images=images)
+
+    session_key = _session_key(event)
+    if plugin_config.deepseek_aggregate_messages:
+        await message_aggregator.add(session_key, text, images, send)
+    else:
+        await reply(session_key, text, send, images=images)
 
 
 @private_chat.handle()

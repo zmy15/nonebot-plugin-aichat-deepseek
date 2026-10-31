@@ -11,6 +11,9 @@ if str(PLUGIN_ROOT) not in sys.path:
 os.environ.setdefault("ENVIRONMENT", "test")
 os.environ.setdefault("DEEPSEEK_API_KEY", "sk-test")
 os.environ.setdefault("DEEPSEEK_DB_PATH", ":memory:")
+os.environ.setdefault("DEEPSEEK_AGGREGATE_MESSAGES", "false")
+os.environ.setdefault("DEEPSEEK_REPLY_DELAY", "0")
+os.environ.setdefault("DEEPSEEK_REPLY_DELAY_JITTER", "0")
 
 
 @pytest.fixture
@@ -45,6 +48,13 @@ def tools_mod():
 @pytest.fixture
 def images_mod():
     import nonebot_plugin_aichat_deepseek.images as module
+
+    return module
+
+
+@pytest.fixture
+def aggregator_mod():
+    import nonebot_plugin_aichat_deepseek.aggregator as module
 
     return module
 

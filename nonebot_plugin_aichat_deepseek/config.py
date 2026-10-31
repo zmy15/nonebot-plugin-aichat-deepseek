@@ -69,8 +69,17 @@ class Config(BaseModel):
     # 每次压缩的消息条数（用户消息和 AI 回复各算一条）
     deepseek_compression_batch_messages: int = Field(default=20, ge=1)
 
+    # 消息聚合：把用户连续发送的多条消息合并后，再判断是否完整
+    deepseek_aggregate_messages: bool = True
+    deepseek_debounce_seconds: float = Field(default=1.2, ge=0)
+    deepseek_debounce_jitter: float = Field(default=0.4, ge=0)
+    deepseek_completeness_check: bool = True
+
     # 输出格式：模型用该分隔符把回复拆成多条消息发送
     deepseek_split_delimiter: str = Field(default="|||", min_length=1)
+    # 首次回复前的随机延迟（秒）及抖动范围（±秒）
+    deepseek_reply_delay: float = Field(default=1.0, ge=0)
+    deepseek_reply_delay_jitter: float = Field(default=0.5, ge=0)
     # 多条消息之间的发送间隔（秒），以及随机抖动范围（±秒）
     deepseek_reply_interval: float = Field(default=1.0, ge=0)
     deepseek_reply_interval_jitter: float = Field(default=0.3, ge=0)

@@ -269,6 +269,100 @@ def test_next_reply_interval(monkeypatch: pytest.MonkeyPatch) -> None:
         assert 0.8 <= chat_module.next_reply_interval() <= 1.2
 
 
+def test_next_initial_delay(monkeypatch: pytest.MonkeyPatch) -> None:
+    from nonebot_plugin_aichat_deepseek import chat as chat_module
+    from nonebot_plugin_aichat_deepseek.config import plugin_config
+
+    monkeypatch.setattr(plugin_config, "deepseek_reply_delay", 0.0)
+    monkeypatch.setattr(plugin_config, "deepseek_reply_delay_jitter", 0.0)
+    assert chat_module.next_initial_delay() == 0.0
+
+    monkeypatch.setattr(plugin_config, "deepseek_reply_delay", 1.0)
+    assert chat_module.next_initial_delay() == 1.0
+
+    monkeypatch.setattr(plugin_config, "deepseek_reply_delay_jitter", 0.3)
+    for _ in range(20):
+        assert 0.7 <= chat_module.next_initial_delay() <= 1.3
+
+
+async def test_completeness_check(monkeypatch: pytest.MonkeyPatch) -> None:
+    from nonebot_plugin_aichat_deepseek import chat as chat_module
+
+    class CompleteClient:
+        configured = True
+
+        def __init__(self, answer: str) -> None:
+            self.answer = answer
+
+        async def chat(self, messages) -> str:
+            return self.answer
+
+    monkeypatch.setattr(
+        chat_module, "client", CompleteClient("INCOMPLETE")
+    )
+    assert (
+        await chat_module._is_message_complete("1:2", "我想问", [])
+        is False
+    )
+
+    monkeypatch.setattr(chat_module, "client", CompleteClient("COMPLETE"))
+    assert (
+        await chat_module._is_message_complete("1:2", "你好", [])
+        is True
+    )
+
+    assert (
+        await chat_module._is_message_complete(
+            "1:2", "看看这张图", [{"url": "a.png"}]
+        )
+        is True
+    )
+
+
+async def test_process_private_message_uses_aggregator(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from nonebot_plugin_aichat_deepseek import chat as chat_module
+    from nonebot_plugin_aichat_deepseek.aggregator import MessageAggregator
+    from nonebot_plugin_aichat_deepseek.config import plugin_config
+
+    completed: list[str] = []
+
+    async def is_complete(key, text, images) -> bool:
+        return True
+
+    async def handle(key, text, images, send) -> None:
+        completed.append(text)
+
+    aggregator = MessageAggregator(
+        debounce_seconds=0.01,
+        debounce_jitter=0,
+        is_complete=is_complete,
+        handler=handle,
+    )
+    monkeypatch.setattr(chat_module, "message_aggregator", aggregator)
+    monkeypatch.setattr(
+        plugin_config, "deepseek_aggregate_messages", True
+    )
+
+    async def send(message: str) -> None:
+        pass
+
+    await chat_module.process_private_message(
+        make_private_event("你"),
+        send,
+    )
+    await chat_module.process_private_message(
+        make_private_event("好"),
+        send,
+    )
+    import asyncio
+
+    await asyncio.sleep(0.05)
+
+    assert completed == ["你\n好"]
+
+
 def test_system_prompt_contains_output_rules() -> None:
     from nonebot_plugin_aichat_deepseek import chat as chat_module
     from nonebot_plugin_aichat_deepseek.config import plugin_config

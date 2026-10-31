@@ -11,6 +11,8 @@
 - 当前上下文持久化到 SQLite，启动时自动加载历史
 - 历史聊天记录复用同一数据库，模型可调用 `query_chat_history` 查询过去聊过什么
 - 长期记忆：自动保存用户信息、偏好、习惯等，并在后续对话中注入 system 指令
+- 连续消息聚合：用户分多次发送的一句话会合并；AI 判断不完整时先不回复，等提问完整
+- 回复抖动：首条回复前有随机停顿，多条回复之间也有随机间隔
 - 支持私聊图片理解：图片经 Files API 上传后以 `file_id` 交给 `deepseek-flash` 分析
 - 未压缩消息超过 30 轮时，自动把最早 20 条消息压缩成摘要，放到 system 指令之后
 - 自动移除 Markdown 标记，只发送纯文本
@@ -49,6 +51,12 @@ DEEPSEEK_MEMORY_MAX_CHARS=1000
 DEEPSEEK_IMAGE_ENABLED=true
 DEEPSEEK_IMAGE_MAX_COUNT=4
 DEEPSEEK_IMAGE_EXPIRE_SECONDS=86400
+DEEPSEEK_AGGREGATE_MESSAGES=true
+DEEPSEEK_DEBOUNCE_SECONDS=1.2
+DEEPSEEK_DEBOUNCE_JITTER=0.4
+DEEPSEEK_COMPLETENESS_CHECK=true
+DEEPSEEK_REPLY_DELAY=1.0
+DEEPSEEK_REPLY_DELAY_JITTER=0.5
 DEEPSEEK_HISTORY_TURNS=30
 DEEPSEEK_COMPRESSION_TRIGGER_TURNS=30
 DEEPSEEK_COMPRESSION_BATCH_MESSAGES=20
@@ -72,6 +80,12 @@ DEEPSEEK_REPLY_INTERVAL=1.0
 | `DEEPSEEK_IMAGE_MAX_COUNT` | `int` | `4` | 单条消息最多处理几张图片 |
 | `DEEPSEEK_IMAGE_TIMEOUT` | `float` | `60.0` | 下载图片超时（秒） |
 | `DEEPSEEK_IMAGE_EXPIRE_SECONDS` | `int` | `86400` | 上传文件有效期（秒），`0` 表示永久有效 |
+| `DEEPSEEK_AGGREGATE_MESSAGES` | `bool` | `True` | 是否把用户连续发送的多条消息聚合后再处理 |
+| `DEEPSEEK_DEBOUNCE_SECONDS` | `float` | `1.2` | 最后一条消息后等待多久再判断是否完整（秒） |
+| `DEEPSEEK_DEBOUNCE_JITTER` | `float` | `0.4` | 聚合等待时间的随机抖动范围（±秒） |
+| `DEEPSEEK_COMPLETENESS_CHECK` | `bool` | `True` | 是否用一次模型调用判断消息是否完整 |
+| `DEEPSEEK_REPLY_DELAY` | `float` | `1.0` | 首条回复前的随机延迟（秒） |
+| `DEEPSEEK_REPLY_DELAY_JITTER` | `float` | `0.5` | 首条回复延迟的随机抖动范围（±秒） |
 | `DEEPSEEK_TIMEOUT` | `float` | `60.0` | 单次请求超时（秒） |
 | `DEEPSEEK_SYSTEM_PROMPT` | `str` | 内置中文助手提示词 | 人设提示词；插件会自动追加纯文本与分隔符输出要求 |
 | `DEEPSEEK_TEMPERATURE` | `float` | `1.0` | 采样温度，范围 0–2 |
@@ -104,6 +118,25 @@ DEEPSEEK_REPLY_INTERVAL=1.0
 插件会自动在系统提示词后追加输出约束：模型只输出纯文本，并用 `|||` 把回复拆成多条短消息。发送前还会移除残留的 Markdown 标记，并按照配置的间隔逐条发送，模拟真人分条聊天的节奏。可以通过 `DEEPSEEK_SPLIT_DELIMITER` 更换分隔符，或把 `DEEPSEEK_REPLY_INTERVAL` 设为 `0` 关闭间隔。
 
 群聊中发送的消息不会触发本插件；以 `/` 开头的消息会交给命令处理器，不会进入对话。
+
+## 消息聚合与回复节奏
+
+用户可能把一句话拆成几条消息发送。插件会把同一个用户连续发送的内容先聚合：
+
+1. 每条新消息都会重置防抖计时器（默认 `1.2` 秒，±`0.4` 秒）；
+2. 计时结束后，把这段时间内的文本按换行拼接，图片合并；
+3. 如果开启 `DEEPSEEK_COMPLETENESS_CHECK`，用一次模型调用判断消息是否完整；
+4. 判断为 `INCOMPLETE` 时不回复、不写入数据库，保留缓冲区等待后续消息；
+5. 判断为 `COMPLETE` 时再进入正式对话，并在首条回复前随机等待 `DEEPSEEK_REPLY_DELAY` 左右的时间。
+
+补充说明：
+
+- 带图片的消息直接视为完整，不额外调用完整性判断；
+- 判断为不完整后如果没有后续消息，插件会一直保持沉默，这是预期行为；
+- 完整性判断会增加一次模型调用，不需要时可关闭；
+- 以 `/` 开头的命令消息不进入聚合；
+- 聚合状态只在内存中，机器人重启后会丢失；
+- 首条回复延迟和多条消息之间的间隔是两套独立配置，分别控制“打字停顿”和“分条发送节奏”。
 
 ## 图片理解
 
