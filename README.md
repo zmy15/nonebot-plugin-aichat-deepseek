@@ -8,6 +8,7 @@
 
 - 支持 OneBot V11 私聊和群聊消息，无需 `/` 等前缀
 - 群聊适配：默认所有群生效，被 @ 必回，非 @ 时按概率随机参与，群聊上下文按群保存
+- 群聊中消息提到机器人昵称、群名片或配置的别名时，即使没有 @ 也会回复
 - 多轮上下文（默认加载最近 30 轮，按用户隔离）
 - 当前上下文持久化到 SQLite，启动时自动加载历史
 - 历史聊天记录复用同一数据库，模型可调用 `query_chat_history` 查询过去聊过什么
@@ -60,6 +61,10 @@ DEEPSEEK_GROUP_ENABLED=true
 DEEPSEEK_GROUP_IDS=
 DEEPSEEK_GROUP_REPLY_PROBABILITY=0.05
 DEEPSEEK_GROUP_REPLY_COOLDOWN=60
+# 没 @ 但消息里提到机器人昵称/群名片/别名时也回复
+DEEPSEEK_GROUP_MENTION_REPLY=true
+# 额外称呼，逗号/空格/顿号分隔；留空则自动使用登录昵称和群名片
+DEEPSEEK_GROUP_BOT_NAMES=
 DEEPSEEK_GROUP_HISTORY_MESSAGES=50
 DEEPSEEK_GROUP_COMPRESSION_ENABLED=true
 DEEPSEEK_GROUP_COMPRESSION_BATCH_MESSAGES=200
@@ -111,7 +116,9 @@ DEEPSEEK_REPLY_INTERVAL=1.0
 | `DEEPSEEK_GROUP_ENABLED` | `bool` | `True` | 是否启用群聊响应 |
 | `DEEPSEEK_GROUP_IDS` | `str` | `""` | 群号白名单；留空表示所有群，填写后只响应这些群，支持逗号/空格/方括号分隔 |
 | `DEEPSEEK_GROUP_REPLY_PROBABILITY` | `float` | `0.05` | 非 @ 消息随机回复概率，0–1 |
-| `DEEPSEEK_GROUP_REPLY_COOLDOWN` | `float` | `60.0` | 同一群两次回复之间的最小间隔（秒） |
+| `DEEPSEEK_GROUP_REPLY_COOLDOWN` | `float` | `60.0` | 同一群两次随机回复之间的最小间隔（秒） |
+| `DEEPSEEK_GROUP_MENTION_REPLY` | `bool` | `True` | 消息提到机器人昵称/群名片/别名时是否回复，即使没有 @ |
+| `DEEPSEEK_GROUP_BOT_NAMES` | `str` | `""` | 额外的机器人称呼，支持逗号/空格/顿号分隔；留空时自动使用登录昵称和群名片 |
 | `DEEPSEEK_GROUP_HISTORY_MESSAGES` | `int` | `50` | 关闭群聊压缩时，群聊上下文最多加载多少条消息 |
 | `DEEPSEEK_GROUP_COMPRESSION_ENABLED` | `bool` | `True` | 是否启用群聊上下文压缩 |
 | `DEEPSEEK_GROUP_COMPRESSION_BATCH_MESSAGES` | `int` | `200` | 每积累多少条未压缩群消息压缩一次 |
@@ -368,6 +375,10 @@ AI：还在忙吗？就是有点惦记你面试的结果。
 
 - 被 @ 时必定回复；
 - 没有被 @ 时，按 `DEEPSEEK_GROUP_REPLY_PROBABILITY`（默认 0.05）随机决定是否参与；
+- 消息里出现机器人的登录昵称、当前群名片或 `DEEPSEEK_GROUP_BOT_NAMES` 里的别名时，即使没有 @ 也会回复；这种回复按“被点名”处理，不受随机回复概率和冷却限制；
+- 机器人昵称和群名片按群缓存 1 小时；配置了别名但自动获取失败时，只使用配置的别名；
+- 纯 ASCII 称呼按单词边界匹配（避免 `ai` 命中 `said`），中文称呼按子串匹配；
+- 这里是按“称呼”匹配，不做语义判断；需要覆盖“机器人”“AI”等泛称时，把它们加入 `DEEPSEEK_GROUP_BOT_NAMES`；
 - 同一群两次回复至少间隔 `DEEPSEEK_GROUP_REPLY_COOLDOWN` 秒（默认 60）；
 - 群聊消息单独保存在 `group_messages` 表，按 `bot_id + group_id` 隔离，并记录每条的 `sender_id`（QQ）和 `sender_name`；
 - 进入模型时格式为“昵称(QQ)：内容”，例如“小明(123456)：今天吃什么”；

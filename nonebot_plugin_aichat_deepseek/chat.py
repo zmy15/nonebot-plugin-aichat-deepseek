@@ -192,6 +192,108 @@ def _should_group_reply(session_key: str) -> bool:
     return random.random() < probability
 
 
+_BOT_NAMES_CACHE: dict[
+    tuple[int, int], tuple[float, tuple[str, ...]]
+] = {}
+_BOT_NAMES_TTL = 3600.0
+_BOT_NAMES_NEGATIVE_TTL = 60.0
+
+
+def _configured_bot_names() -> list[str]:
+    """读取配置里的机器人称呼，支持中英文逗号、顿号和空白。"""
+    raw = plugin_config.deepseek_group_bot_names.strip()
+    if not raw:
+        return []
+    return [part for part in re.split(r"[,，、\s]+", raw) if part]
+
+
+def _dedupe_names(names: list[str]) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for name in names:
+        name = name.strip()
+        if not name:
+            continue
+        key = name.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(name)
+    return result
+
+
+def _mentions_bot(text: str, names: list[str]) -> bool:
+    """判断消息是否提到机器人。
+
+    中文按子串匹配；纯 ASCII 名称加单词边界，避免 "ai" 命中 "said"。
+    """
+    if not text or not names:
+        return False
+    folded = text.casefold()
+    for name in names:
+        if not name:
+            continue
+        if name.isascii():
+            pattern = (
+                rf"(?<![a-z0-9]){re.escape(name.casefold())}"
+                r"(?![a-z0-9])"
+            )
+            if re.search(pattern, folded):
+                return True
+        elif name in text:
+            return True
+    return False
+
+
+async def _resolve_group_bot_names(
+    bot: Bot | None,
+    group_id: int,
+    self_id: int,
+) -> list[str]:
+    """返回当前群的机器人称呼：配置别名 + 登录昵称 + 群名片。"""
+    configured = _configured_bot_names()
+    if bot is None:
+        return _dedupe_names(configured)
+
+    key = (self_id, group_id)
+    now = time.monotonic()
+    cached = _BOT_NAMES_CACHE.get(key)
+    if cached is not None and now < cached[0]:
+        return _dedupe_names([*configured, *cached[1]])
+
+    fetched: list[str] = []
+    try:
+        login = await bot.call_api("get_login_info")
+        if isinstance(login, dict):
+            nickname = login.get("nickname")
+            if isinstance(nickname, str):
+                fetched.append(nickname)
+    except Exception:
+        logger.debug("获取机器人登录昵称失败，跳过自动称呼", exc_info=True)
+
+    try:
+        member = await bot.call_api(
+            "get_group_member_info",
+            group_id=group_id,
+            user_id=self_id,
+            no_cache=False,
+        )
+        if isinstance(member, dict):
+            for field in ("card", "nickname"):
+                value = member.get(field)
+                if isinstance(value, str):
+                    fetched.append(value)
+    except Exception:
+        logger.debug("获取机器人群名片失败，跳过自动称呼", exc_info=True)
+
+    # 单字称呼容易误伤，自动获取到的称呼至少保留两个字符。
+    fetched = [name for name in fetched if len(name.strip()) >= 2]
+    names = _dedupe_names(fetched)
+    ttl = _BOT_NAMES_TTL if names else _BOT_NAMES_NEGATIVE_TTL
+    _BOT_NAMES_CACHE[key] = (now + ttl, tuple(names))
+    return _dedupe_names([*configured, *names])
+
+
 def _cancel_pending_followup(session_key: str) -> None:
     cancel_followup(get_scheduler(), session_key)
 
@@ -710,7 +812,9 @@ def _group_sticker_note(records: list[dict[str, Any]]) -> str:
 
 
 async def process_group_message(
-    event: GroupMessageEvent, send: Sender
+    event: GroupMessageEvent,
+    send: Sender,
+    bot: Bot | None = None,
 ) -> None:
     session_key = _group_session_key(event)
     if event.user_id == event.self_id:
@@ -775,7 +879,23 @@ async def process_group_message(
     if not text and not to_me:
         return
 
-    if to_me:
+    discussing = False
+    if (
+        text
+        and not to_me
+        and plugin_config.deepseek_group_mention_reply
+    ):
+        names = await _resolve_group_bot_names(
+            bot, event.group_id, event.self_id
+        )
+        discussing = _mentions_bot(text, names)
+        if discussing:
+            logger.info(
+                f"[group] mention detected session={session_key} "
+                f"user={event.user_id}"
+            )
+
+    async def respond() -> None:
         _mark_group_reply(session_key)
         await reply(
             session_key,
@@ -789,22 +909,17 @@ async def process_group_message(
             sender_id=event.user_id,
             sender_name=sender,
         )
+
+    if to_me:
+        await respond()
+        return
+
+    if discussing:
+        await respond()
         return
 
     if _should_group_reply(session_key):
-        _mark_group_reply(session_key)
-        await reply(
-            session_key,
-            text,
-            send,
-            group=True,
-            history_limit=plugin_config.deepseek_group_history_messages,
-            allow_followup=False,
-            bot_id=event.self_id,
-            group_id=event.group_id,
-            sender_id=event.user_id,
-            sender_name=sender,
-        )
+        await respond()
 
 
 async def process_private_message(event: PrivateMessageEvent, send: Sender) -> None:
@@ -863,7 +978,7 @@ async def handle_group_chat(bot: Bot, event: GroupMessageEvent) -> None:
             message=message,
         )
 
-    await process_group_message(event, send)
+    await process_group_message(event, send, bot)
 
 
 @group_poke.handle()

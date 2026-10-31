@@ -34,6 +34,11 @@ class Config(BaseModel):
         default=0.05, ge=0, le=1
     )
     deepseek_group_reply_cooldown: float = Field(default=60.0, ge=0)
+    # 没有 @ 但消息里提到机器人昵称/群名片/别名时也回复
+    deepseek_group_mention_reply: bool = True
+    # 额外的机器人称呼，支持逗号/空格/顿号分隔；
+    # 不填时自动使用登录昵称和群名片
+    deepseek_group_bot_names: str = ""
     # 群聊上下文：关闭压缩时才按这个条数截取最近消息
     deepseek_group_history_messages: int = Field(default=50, ge=1)
 
