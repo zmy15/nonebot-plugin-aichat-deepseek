@@ -154,3 +154,42 @@ async def test_ping_still_works(app: App) -> None:
         ctx.should_pass_rule()
         ctx.should_call_send(event, "pong", result=None)
         ctx.should_finished()
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "/清空",
+        "/清除",
+        "/重置",
+        "/清空上下文",
+        "/清除上下文",
+        "/重置上下文",
+        "/clear",
+        "/reset",
+    ],
+)
+async def test_clear_command_clears_context(app: App, command: str) -> None:
+    from nonebot_plugin_aichat_deepseek import chat
+
+    chat.store.clear("1:2")
+    chat.store.add_turn("1:2", "旧问题", "旧回答")
+    chat.store.add_memory("1:2", "喜欢猫")
+    chat.store.set_user_prompt("1:2", "保留这个设定")
+
+    async with app.test_matcher(chat.clear_context_command) as ctx:
+        bot = make_bot(ctx)
+        event = make_private_event(command)
+        ctx.receive_event(bot, event)
+        ctx.should_pass_rule()
+        ctx.should_call_send(
+            event,
+            "已清空当前用户的全部对话上下文。",
+            result=None,
+        )
+        ctx.should_finished()
+
+    assert chat.store.build_messages("1:2") == []
+    assert chat.store.list_memories("1:2") == []
+    assert chat.store.get_user_prompt("1:2") == "保留这个设定"
+    chat.store.clear("1:2")

@@ -12,7 +12,7 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import datetime
 from typing import Any
 
-from nonebot import get_driver, logger, on_message, on_notice
+from nonebot import get_driver, logger, on_command, on_message, on_notice
 from nonebot.adapters import Event
 from nonebot.adapters.onebot.v11 import Bot, PokeNotifyEvent, PrivateMessageEvent
 from nonebot.matcher import Matcher
@@ -651,6 +651,37 @@ async def process_private_poke(event: PokeNotifyEvent, send: Sender) -> None:
         f"[chat] poke session={session_key} target={event.target_id}"
     )
     await reply(session_key, POKE_PROMPT, send)
+
+
+async def clear_user_context(session_key: str) -> None:
+    """清空当前用户的消息、摘要和长期记忆，保留自定义提示词。"""
+    await message_aggregator.discard(session_key)
+    async with store.lock(session_key):
+        store.clear_context(session_key)
+    logger.info(f"[chat] clear_context session={session_key}")
+
+
+clear_context_command = on_command(
+    "清空",
+    aliases={
+        "清除",
+        "重置",
+        "清空上下文",
+        "清除上下文",
+        "重置上下文",
+        "clear",
+        "reset",
+    },
+    rule=Rule(_is_private_message),
+    priority=5,
+    block=True,
+)
+
+
+@clear_context_command.handle()
+async def handle_clear_context(event: PrivateMessageEvent) -> None:
+    await clear_user_context(_session_key(event))
+    await clear_context_command.finish("已清空当前用户的全部对话上下文。")
 
 
 async def process_private_message(event: PrivateMessageEvent, send: Sender) -> None:

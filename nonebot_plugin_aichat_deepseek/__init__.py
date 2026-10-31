@@ -24,7 +24,9 @@ __plugin_meta__ = PluginMetadata(
         "连续发送的多条消息会先聚合，判断完整后再回复。\n"
         "也可以用自然语言设置只属于自己的 system 提示词或人设。\n"
         "模型可以戳一戳用户，用户戳机器人时也会得到回应。\n"
-        "发送 /ping 可检查插件是否在线。"
+        "发送 /ping 可检查插件是否在线。\n"
+        "发送 /清空 可清空当前用户的对话上下文，"
+        "也支持 /清除、/重置、/clear、/reset 等别名。"
     ),
     type="application",
     homepage="https://github.com/zmy15/nonebot-plugin-aichat-deepseek",

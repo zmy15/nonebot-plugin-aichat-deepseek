@@ -93,6 +93,20 @@ class MessageAggregator:
                 self._flush_after(session_key, version)
             )
 
+    async def discard(self, session_key: str) -> None:
+        """丢弃某个会话尚未处理的消息，用于清空上下文命令。"""
+        self._versions[session_key] = (
+            self._versions.get(session_key, 0) + 1
+        )
+        async with self._lock_for(session_key):
+            self._pending.pop(session_key, None)
+            self._versions[session_key] = (
+                self._versions.get(session_key, 0) + 1
+            )
+            task = self._tasks.pop(session_key, None)
+            if task is not None and task is not asyncio.current_task():
+                task.cancel()
+
     async def _flush_after(self, key: str, version: int) -> None:
         await asyncio.sleep(self._delay())
 
@@ -116,6 +130,9 @@ class MessageAggregator:
                 complete = await self._is_complete(key, text, images)
             except Exception:
                 logger.exception("消息完整性判断失败，按完整处理")
+
+            if self._versions.get(key) != version:
+                return
 
             if not complete:
                 self._clear_task(key)

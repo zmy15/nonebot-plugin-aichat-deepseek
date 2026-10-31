@@ -398,7 +398,8 @@ class ConversationStore:
             for created_at, user_content, assistant_content in rows
         ]
 
-    def clear(self, key: str) -> None:
+    def clear_context(self, key: str) -> None:
+        """清空对话上下文：消息、摘要和长期记忆，保留自定义提示词。"""
         with self._conn:
             self._conn.execute(
                 "DELETE FROM messages WHERE session_key = ?", (key,)
@@ -409,11 +410,15 @@ class ConversationStore:
             self._conn.execute(
                 "DELETE FROM memories WHERE session_key = ?", (key,)
             )
+        self._messages.pop(key, None)
+        self._summaries.pop(key, None)
+
+    def clear(self, key: str) -> None:
+        self.clear_context(key)
+        with self._conn:
             self._conn.execute(
                 "DELETE FROM user_prompts WHERE session_key = ?", (key,)
             )
-        self._messages.pop(key, None)
-        self._summaries.pop(key, None)
         self._user_prompts.pop(key, None)
 
     def close(self) -> None:
