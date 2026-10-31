@@ -60,7 +60,7 @@ DEEPSEEK_DB_PATH=data/nonebot_plugin_aichat_deepseek/chat.db
 DEEPSEEK_GROUP_ENABLED=true
 # 留空表示所有群；填写后只处理这些群
 DEEPSEEK_GROUP_IDS=
-DEEPSEEK_GROUP_REPLY_PROBABILITY=0.05
+DEEPSEEK_GROUP_REPLY_PROBABILITY=0.2
 DEEPSEEK_GROUP_REPLY_COOLDOWN=60
 # 没 @ 但消息里提到机器人昵称/群名片/别名时也回复
 DEEPSEEK_GROUP_MENTION_REPLY=true
@@ -117,7 +117,7 @@ DEEPSEEK_REPLY_INTERVAL=1.0
 | `DEEPSEEK_DB_PATH` | `str` | `data/nonebot_plugin_aichat_deepseek/chat.db` | SQLite 数据库路径，相对路径基于机器人启动目录 |
 | `DEEPSEEK_GROUP_ENABLED` | `bool` | `True` | 是否启用群聊响应 |
 | `DEEPSEEK_GROUP_IDS` | `str` | `""` | 群号白名单；留空表示所有群，填写后只响应这些群，支持逗号/空格/方括号分隔 |
-| `DEEPSEEK_GROUP_REPLY_PROBABILITY` | `float` | `0.05` | 非 @ 消息随机回复概率，0–1 |
+| `DEEPSEEK_GROUP_REPLY_PROBABILITY` | `float` | `0.2` | 非 @ 消息随机回复概率，0–1 |
 | `DEEPSEEK_GROUP_REPLY_COOLDOWN` | `float` | `60.0` | 同一群两次随机回复之间的最小间隔（秒） |
 | `DEEPSEEK_GROUP_MENTION_REPLY` | `bool` | `True` | 消息提到机器人昵称/群名片/别名时是否回复，即使没有 @ |
 | `DEEPSEEK_GROUP_BOT_NAMES` | `str` | `""` | 额外的机器人称呼，支持逗号/空格/顿号分隔；留空时自动使用登录昵称和群名片 |
@@ -377,7 +377,7 @@ AI：还在忙吗？就是有点惦记你面试的结果。
 启用 `DEEPSEEK_GROUP_ENABLED` 后，默认所有群都生效；如果填写了 `DEEPSEEK_GROUP_IDS`，则只处理这些群。机器人在群中：
 
 - 被 @ 时必定回复；
-- 没有被 @ 时，按 `DEEPSEEK_GROUP_REPLY_PROBABILITY`（默认 0.05）随机决定是否参与；
+- 没有被 @ 时，按 `DEEPSEEK_GROUP_REPLY_PROBABILITY`（默认 0.2）随机决定是否参与；
 - 消息里出现机器人的登录昵称、当前群名片或 `DEEPSEEK_GROUP_BOT_NAMES` 里的别名时，即使没有 @ 也会回复；这种回复按“被点名”处理，不受随机回复概率和冷却限制；
 - 机器人昵称和群名片按群缓存 1 小时；配置了别名但自动获取失败时，只使用配置的别名；
 - 纯 ASCII 称呼按单词边界匹配（避免 `ai` 命中 `said`），中文称呼按子串匹配；
@@ -400,7 +400,7 @@ AI：还在忙吗？就是有点惦记你面试的结果。
 
 ```dotenv
 DEEPSEEK_GROUP_IDS=123456789,987654321
-DEEPSEEK_GROUP_REPLY_PROBABILITY=0.05
+DEEPSEEK_GROUP_REPLY_PROBABILITY=0.2
 DEEPSEEK_GROUP_REPLY_COOLDOWN=60
 ```
 

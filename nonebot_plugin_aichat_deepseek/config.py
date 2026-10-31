@@ -31,7 +31,7 @@ class Config(BaseModel):
     # 群号，支持逗号/空格分隔，例如 123456 或 [123456, 789012]
     deepseek_group_ids: str = ""
     deepseek_group_reply_probability: float = Field(
-        default=0.05, ge=0, le=1
+        default=0.2, ge=0, le=1
     )
     deepseek_group_reply_cooldown: float = Field(default=60.0, ge=0)
     # 没有 @ 但消息里提到机器人昵称/群名片/别名时也回复
