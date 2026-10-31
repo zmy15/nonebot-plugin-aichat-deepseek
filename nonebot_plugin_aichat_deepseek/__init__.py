@@ -36,7 +36,9 @@ __plugin_meta__ = PluginMetadata(
         "私聊发送表情包会自动收藏，模型可以按含义查询并发送。\n"
         "发送 /ping 可检查插件是否在线。\n"
         "发送 /清空 可清空当前用户的对话上下文，"
-        "也支持 /清除、/重置、/clear、/reset 等别名。"
+        "也支持 /清除、/重置、/clear、/reset 等别名。\n"
+        "SUPERUSERS 可发送 /清空群 <群号>（或在群内发送 /清空群）"
+        "清空指定群的消息、摘要和群记忆。"
     ),
     type="application",
     homepage="https://github.com/zmy15/nonebot-plugin-aichat-deepseek",

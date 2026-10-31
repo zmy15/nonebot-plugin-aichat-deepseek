@@ -415,7 +415,7 @@ DEEPSEEK_GROUP_REPLY_COOLDOWN=60
 - 群聊的 token 检测优先使用 API 返回的 `prompt_tokens`；API 未返回用量时使用插件内置的字符数估算。
 - `query_chat_history` 工具只查询私聊的 `messages` 表；群聊不启用历史查询工具。
 - `messages.created_at` 和 `group_messages.created_at` 以 UTC 保存；工具输入和返回的时间统一按 UTC+8 解释和展示。
-- 发送 `/清空` 会删除当前私聊用户的 `messages`、`summaries` 和 `memories` 记录，保留 `user_prompts` 中的自定义人设；群聊上下文和群记忆不会被 `/清空` 删除。
+- 发送 `/清空` 会删除当前私聊用户的 `messages`、`summaries` 和 `memories` 记录，保留 `user_prompts` 中的自定义人设；群聊上下文和群记忆不会被 `/清空` 删除，SUPERUSERS 可用 `/清空群` 单独清空指定群。
 - 私聊长期记忆保存在 `memories` 表，按 `session_key` 隔离。
 - 群聊记忆保存在 `group_memories` 表：`scope='member'` 按群成员 QQ 区分，`scope='group'` 保存整群共享记忆。
 - 每个用户的自定义 system 提示词保存在同一数据库的 `user_prompts` 表中，同样按 `session_key` 隔离。
@@ -669,9 +669,19 @@ DEEPSEEK_GROUP_REPLY_COOLDOWN=60
 | --- | --- |
 | `/ping` | 检查插件是否在线，回复 `pong` |
 | `/清空` | 清空当前私聊用户的消息、摘要和长期记忆，保留自定义 system 提示词 |
+| `/清空群 <群号>` | 仅 SUPERUSERS 可用；清空指定群的消息、摘要和群/成员记忆。在目标群内可省略群号 |
 | `/清除`、`/重置`、`/清空上下文`、`/清除上下文`、`/重置上下文`、`/clear`、`/reset` | `/清空` 的兼容别名 |
+| `/清除群`、`/重置群`、`/清空群聊`、`/清除群聊`、`/重置群聊`、`/清空群上下文`、`/clear-group`、`/reset-group` | `/清空群` 的兼容别名 |
 
 `/清空` 及其别名只作用于当前私聊用户，不会影响其他用户。清空后聊天从零开始，自定义人设仍然保留；如果也需要恢复默认人设，可另外让模型调用 `clear_user_system_prompt`。
+
+`/清空群` 只对 `SUPERUSERS` 开放。可以发送 `/清空群 123456` 指定群号，也可以在目标群里直接发送 `/清空群`。它会清空该群的群消息、历史摘要、群共享记忆和成员记忆，但不会删除全局表情库或其他群的数据。
+
+`SUPERUSERS` 使用 NoneBot 的标准配置，例如：
+
+```dotenv
+SUPERUSERS=["123456789"]
+```
 
 ## 代码结构
 

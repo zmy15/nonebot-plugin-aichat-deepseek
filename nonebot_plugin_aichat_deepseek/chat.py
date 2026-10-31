@@ -16,7 +16,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from nonebot import logger, on_command, on_message, on_notice
-from nonebot.adapters import Event
+from nonebot.adapters import Event, Message
 from nonebot.adapters.onebot.v11 import (
     Bot,
     GroupMessageEvent,
@@ -24,6 +24,8 @@ from nonebot.adapters.onebot.v11 import (
     PrivateMessageEvent,
 )
 from nonebot.matcher import Matcher
+from nonebot.params import CommandArg
+from nonebot.permission import SUPERUSER
 from nonebot.rule import Rule
 
 from .aggregator import MessageAggregator
@@ -793,6 +795,64 @@ clear_context_command = on_command(
 async def handle_clear_context(event: PrivateMessageEvent) -> None:
     await clear_user_context(_session_key(event))
     await clear_context_command.finish("已清空当前用户的全部对话上下文。")
+
+
+async def clear_group_context(bot_id: int, group_id: int) -> None:
+    """清空指定群的对话上下文、摘要和群/成员记忆。"""
+    session_key = f"group:{bot_id}:{group_id}"
+    async with store.lock(session_key):
+        store.clear_group_all(bot_id, group_id)
+    _GROUP_LAST_REPLY.pop(session_key, None)
+    _GROUP_LAST_SYSTEM.pop(session_key, None)
+    _GROUP_LAST_PROMPT_TOKENS.pop(session_key, None)
+    _GROUP_LAST_HISTORY_COUNT.pop(session_key, None)
+    _GROUP_LAST_TOOLS.pop(session_key, None)
+    logger.info(f"[group] clear_context bot={bot_id} group={group_id}")
+
+
+clear_group_command = on_command(
+    "清空群",
+    aliases={
+        "清除群",
+        "重置群",
+        "清空群聊",
+        "清除群聊",
+        "重置群聊",
+        "清空群上下文",
+        "清除群上下文",
+        "重置群上下文",
+        "clear-group",
+        "reset-group",
+    },
+    permission=SUPERUSER,
+    priority=5,
+    block=True,
+)
+
+
+@clear_group_command.handle()
+async def handle_clear_group(
+    event: Event,
+    args: Message = CommandArg(),
+) -> None:
+    raw = args.extract_plain_text().strip()
+    match = re.search(r"\d+", raw)
+    group_id: int | None = None
+    if match:
+        group_id = int(match.group())
+    elif isinstance(event, GroupMessageEvent):
+        group_id = event.group_id
+
+    if group_id is None:
+        await clear_group_command.finish(
+            "用法：/清空群 <群号>，或在目标群内直接发送 /清空群。"
+        )
+        return
+
+    await clear_group_context(int(event.self_id), group_id)
+    await clear_group_command.finish(
+        f"已清空群 {group_id} 的全部上下文（消息、摘要和群记忆）。"
+    )
 
 
 def _group_sticker_note(records: list[dict[str, Any]]) -> str:

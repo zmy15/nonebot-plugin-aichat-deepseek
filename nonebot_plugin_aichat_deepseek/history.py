@@ -673,6 +673,25 @@ class ConversationStore:
                 (bot_id, group_id),
             )
 
+    def clear_group_all(self, bot_id: int, group_id: int) -> None:
+        """清空群消息、摘要以及群共享/成员记忆。"""
+        with self._conn:
+            self._conn.execute(
+                "DELETE FROM group_messages "
+                "WHERE bot_id = ? AND group_id = ?",
+                (bot_id, group_id),
+            )
+            self._conn.execute(
+                "DELETE FROM group_summaries "
+                "WHERE bot_id = ? AND group_id = ?",
+                (bot_id, group_id),
+            )
+            self._conn.execute(
+                "DELETE FROM group_memories "
+                "WHERE bot_id = ? AND group_id = ?",
+                (bot_id, group_id),
+            )
+
     def get_summary(self, key: str) -> str:
         return self._summaries.get(key, "")
 
