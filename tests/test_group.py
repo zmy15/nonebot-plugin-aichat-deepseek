@@ -441,6 +441,7 @@ def test_group_tool_definitions(tools_mod) -> None:
         "describe_sticker",
         "search_stickers",
         "send_sticker",
+        "recall_message",
         "web_search",
     } <= names
     assert "query_chat_history" not in names

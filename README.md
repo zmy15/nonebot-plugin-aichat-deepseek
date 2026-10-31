@@ -25,6 +25,7 @@
 - 未回复追问：AI 提问后用户一段时间没回复，会自动再补一句
 - 表情包收藏：自动把私聊/群聊收到的表情包存入对应表情库，记录含义和标签
 - 模型可调用工具按含义查询表情包，并通过 OneBot 图片消息发送到私聊或群聊
+- 撤回工具：模型可以尝试撤回自己最近发送的消息（仅自己发送的，是否成功取决于平台）
 - 未压缩消息超过 30 轮时，自动把最早 20 条消息压缩成摘要，放到 system 指令之后
 - 群聊上下文自动压缩：默认每 200 条消息压缩一次，prompt 超过 900k token 时也会触发；摘要不超过 10k token，压缩请求复用上次请求前缀以命中缓存
 - 自动移除 Markdown 标记，只发送纯文本
@@ -74,6 +75,7 @@ DEEPSEEK_GROUP_COMPRESSION_MERGE_SUMMARIES=4
 DEEPSEEK_TOOLS_ENABLED=true
 DEEPSEEK_TOOL_MAX_ROUNDS=3
 DEEPSEEK_POKE_ENABLED=true
+DEEPSEEK_RECALL_ENABLED=true
 DEEPSEEK_MEMORY_ENABLED=true
 DEEPSEEK_MEMORY_MAX_ITEMS=20
 DEEPSEEK_MEMORY_MAX_CHARS=1000
@@ -128,6 +130,7 @@ DEEPSEEK_REPLY_INTERVAL=1.0
 | `DEEPSEEK_TOOLS_ENABLED` | `bool` | `True` | 是否允许模型调用工具 |
 | `DEEPSEEK_TOOL_MAX_ROUNDS` | `int` | `3` | 单次回复最多允许几轮工具调用 |
 | `DEEPSEEK_POKE_ENABLED` | `bool` | `True` | 是否启用戳一戳工具和戳一戳事件回应 |
+| `DEEPSEEK_RECALL_ENABLED` | `bool` | `True` | 是否启用 `recall_message` 撤回工具 |
 | `DEEPSEEK_MEMORY_ENABLED` | `bool` | `True` | 是否启用长期记忆的保存、查询和注入 |
 | `DEEPSEEK_MEMORY_MAX_ITEMS` | `int` | `20` | 每次最多注入多少条长期记忆 |
 | `DEEPSEEK_MEMORY_MAX_CHARS` | `int` | `1000` | 注入长期记忆的字符预算 |
@@ -482,6 +485,7 @@ DEEPSEEK_GROUP_REPLY_COOLDOWN=60
 | `get_user_system_prompt` | 查看当前用户的自定义提示词 |
 | `clear_user_system_prompt` | 清除当前用户的自定义提示词 |
 | `poke_user` | 戳一戳当前私聊用户 |
+| `recall_message` | 尝试撤回机器人自己最近发送的消息 |
 | `schedule_task` | 创建定时主动聊天或定时戳一戳 |
 | `list_scheduled_tasks` | 查看当前用户已创建的定时任务 |
 | `cancel_scheduled_task` | 取消当前用户的一个定时任务 |
@@ -490,7 +494,7 @@ DEEPSEEK_GROUP_REPLY_COOLDOWN=60
 | `search_stickers` | 按含义或标签查询表情包 |
 | `send_sticker` | 查询并发送一个表情包 |
 
-群聊中向模型提供记忆、戳一戳、表情包和联网搜索工具；不提供查询历史和定时任务工具。
+群聊中向模型提供记忆、戳一戳、撤回、表情包和联网搜索工具；不提供查询历史和定时任务工具。
 
 ### `query_chat_history`
 
@@ -599,6 +603,14 @@ DEEPSEEK_GROUP_REPLY_COOLDOWN=60
 ### `poke_user`
 
 无参数。私聊中戳一戳当前用户，群聊中戳一戳当前发言人。用户要求时调用，对话气氛合适时也会主动戳一戳；用户戳你时也可以戳回去。私聊优先调用 `friend_poke`，失败时尝试 `send_poke`；群聊使用带 `group_id` 的 `send_poke`。
+
+### `recall_message`
+
+| 参数 | 类型 | 说明 |
+| --- | --- | --- |
+| `count` | `integer` | 可选，撤回最近几条消息，默认 1，最多 5 |
+
+只能撤回机器人自己在当前会话中发送的消息，且只记录本次运行中最近 2 分钟、每个会话最多 20 条。是否成功取决于平台是否仍允许撤回；失败时会返回失败的消息 ID。所有已发送的文本回复、错误提示和表情包都会记录，重启后记录清空。
 
 ### `schedule_task`
 

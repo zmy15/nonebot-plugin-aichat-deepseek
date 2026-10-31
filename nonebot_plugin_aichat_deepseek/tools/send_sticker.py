@@ -87,6 +87,7 @@ async def execute(args: dict[str, Any], ctx: ToolContext) -> str:
                 None,
                 sticker["file_path"],
                 group_id=ctx.group_id,
+                session_key=ctx.session_key,
             )
         except StickerError as exc:
             return error(str(exc))
@@ -120,7 +121,10 @@ async def execute(args: dict[str, Any], ctx: ToolContext) -> str:
 
     try:
         method = await send_sticker_image(
-            bot, target_id, sticker["file_path"]
+            bot,
+            target_id,
+            sticker["file_path"],
+            session_key=ctx.session_key,
         )
     except StickerError as exc:
         return error(str(exc))

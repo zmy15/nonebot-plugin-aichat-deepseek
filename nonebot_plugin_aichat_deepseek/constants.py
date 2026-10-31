@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+from typing import Any
 
-Sender = Callable[[str], Awaitable[None]]
+Sender = Callable[[str], Awaitable[Any]]
 
 MISSING_API_KEY_TIP = "还没有配置 DEEPSEEK_API_KEY，请先在 .env 中填写后再试。"
 IMAGE_DISABLED_TIP = "图片理解功能还没有开启。"

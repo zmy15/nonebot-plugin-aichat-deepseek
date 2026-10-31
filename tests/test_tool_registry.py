@@ -23,6 +23,7 @@ def test_each_tool_is_self_contained(tools_mod) -> None:
         "describe_sticker",
         "search_stickers",
         "send_sticker",
+        "recall_message",
     ]
     assert len(names) == len(set(names))
     assert set(names) <= set(TOOL_BY_NAME)

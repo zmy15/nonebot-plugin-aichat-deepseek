@@ -28,6 +28,7 @@ from .list_scheduled_tasks import NAME as TOOL_LIST_SCHEDULED_TASKS
 from .memory import MEMORY_CATEGORIES, MEMORY_CATEGORY_LABELS
 from .poke_user import NAME as TOOL_POKE_USER
 from .query_history import NAME as TOOL_QUERY_HISTORY
+from .recall_message import NAME as TOOL_RECALL_MESSAGE
 from .registry import (
     TOOL_DEFINITIONS,
     build_group_tool_definitions,
@@ -99,6 +100,7 @@ __all__ = [
     "TOOL_GET_USER_PROMPT",
     "TOOL_CLEAR_USER_PROMPT",
     "TOOL_POKE_USER",
+    "TOOL_RECALL_MESSAGE",
     "TOOL_SCHEDULE_TASK",
     "TOOL_LIST_SCHEDULED_TASKS",
     "TOOL_CANCEL_SCHEDULED_TASK",

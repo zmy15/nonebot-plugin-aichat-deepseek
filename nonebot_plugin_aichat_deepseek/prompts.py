@@ -86,6 +86,16 @@ def _build_system_prompt(
             )
         if (
             plugin_config.deepseek_tools_enabled
+            and plugin_config.deepseek_recall_enabled
+        ):
+            rules += (
+                "\n如果你发现自己刚才发错了消息、说了不该说的内容，"
+                "或群成员要求撤回，调用 recall_message 尝试撤回自己"
+                "最近发送的消息；只能撤回自己发送的消息，"
+                "是否成功取决于平台是否仍允许撤回。"
+            )
+        if (
+            plugin_config.deepseek_tools_enabled
             and plugin_config.deepseek_sticker_enabled
         ):
             rules += (
@@ -183,6 +193,16 @@ def _build_system_prompt(
             "\n用户要求你戳一戳、提醒或互动时，调用 poke_user；"
             "不要等用户开口，聊天气氛合适时主动戳一戳；"
             "用户戳你时，也可以戳回去。"
+        )
+
+    if (
+        plugin_config.deepseek_tools_enabled
+        and plugin_config.deepseek_recall_enabled
+    ):
+        rules += (
+            "\n如果你发现自己刚才发错了消息、说了不该说的内容，"
+            "或用户要求撤回，调用 recall_message 尝试撤回自己最近发送的"
+            "消息；只能撤回自己发送的消息，是否成功取决于平台是否仍允许撤回。"
         )
 
     if (

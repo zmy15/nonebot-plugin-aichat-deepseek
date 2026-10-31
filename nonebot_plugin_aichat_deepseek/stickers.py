@@ -21,6 +21,7 @@ from nonebot import logger
 from .config import plugin_config
 from .history import ConversationStore
 from .images import ImagePayload
+from .sent_messages import record_result
 
 # 1 表情包、3 斗图、7 贴图都按表情包处理
 _STICKER_SUB_TYPES = frozenset({1, 3, 7})
@@ -134,15 +135,14 @@ async def _send_image(
     file_value: str,
     *,
     group_id: int | None = None,
-) -> None:
+) -> Any:
     if group_id is not None:
-        await bot.call_api(
+        return await bot.call_api(
             "send_group_msg",
             group_id=group_id,
             message=[{"type": "image", "data": {"file": file_value}}],
         )
-        return
-    await bot.call_api(
+    return await bot.call_api(
         "send_private_msg",
         user_id=user_id,
         message=[{"type": "image", "data": {"file": file_value}}],
@@ -155,6 +155,7 @@ async def send_sticker_image(
     file_path: str | Path,
     *,
     group_id: int | None = None,
+    session_key: str | None = None,
 ) -> str:
     """发送本地表情包图片到私聊或群聊，返回实际使用的发送方式。"""
     path = Path(file_path).expanduser()
@@ -162,29 +163,34 @@ async def send_sticker_image(
         raise StickerError("表情包文件不存在，可能已被移动或删除")
 
     try:
-        await _send_image(
+        result = await _send_image(
             bot,
             user_id,
             path.resolve().as_uri(),
             group_id=group_id,
         )
-        return "file_uri"
     except Exception as first_error:
         logger.warning(
             f"表情包 file:// 发送失败，尝试 base64："
             f"{first_error.__class__.__name__}"
         )
+    else:
+        if session_key:
+            record_result(session_key, result, "表情包")
+        return "file_uri"
 
     try:
         data = path.read_bytes()
-        await _send_image(
+        result = await _send_image(
             bot,
             user_id,
             f"base64://{base64.b64encode(data).decode()}",
             group_id=group_id,
         )
-        return "base64"
     except Exception as second_error:
         raise StickerError(
             f"发送表情包失败：{second_error.__class__.__name__}"
         ) from second_error
+    if session_key:
+        record_result(session_key, result, "表情包")
+    return "base64"

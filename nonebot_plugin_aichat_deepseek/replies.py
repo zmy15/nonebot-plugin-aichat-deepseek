@@ -169,6 +169,7 @@ async def generate_private_reply(
                     plugin_config.deepseek_custom_prompt_enabled
                 ),
                 include_poke=plugin_config.deepseek_poke_enabled,
+                include_recall=plugin_config.deepseek_recall_enabled,
                 include_stickers=plugin_config.deepseek_sticker_enabled,
                 include_search=plugin_config.deepseek_search_enabled,
                 include_scheduler=plugin_config.deepseek_scheduler_enabled,

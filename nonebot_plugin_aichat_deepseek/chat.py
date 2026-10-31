@@ -58,6 +58,7 @@ from .images import ImageError, fetch_image
 from .prompts import _build_system_prompt
 from .replies import generate_group_reply, generate_private_reply
 from .scheduled_tasks import cancel_followup, get_scheduler, schedule_followup
+from .sent_messages import record_result
 from .stickers import is_sticker_image, save_sticker_payload
 from .timing import (
     _looks_like_question,
@@ -483,9 +484,14 @@ async def reply(
         f"text_len={len(text)} images={len(images or [])}"
     )
 
+    async def deliver(message: str) -> Any:
+        result = await send(message)
+        record_result(session_key, result, message)
+        return result
+
     if not client.configured:
         _log_reply(qid, session_key, False, "no_api_key", usage)
-        await send(MISSING_API_KEY_TIP)
+        await deliver(MISSING_API_KEY_TIP)
         return
 
     async with store.lock(session_key):
@@ -517,7 +523,7 @@ async def reply(
         except ImageError as exc:
             logger.warning(f"图片处理失败：{exc}")
             _log_reply(qid, session_key, False, "image_error", usage)
-            await send(f"图片处理失败：{exc}")
+            await deliver(f"图片处理失败：{exc}")
             return
         except DeepSeekError as exc:
             logger.warning(
@@ -535,12 +541,12 @@ async def reply(
                 reason,
                 usage,
             )
-            await send(_format_error(exc))
+            await deliver(_format_error(exc))
             return
         except Exception:
             logger.exception("DeepSeek 对话处理出现未预期异常")
             _log_reply(qid, session_key, False, "exception", usage)
-            await send("处理对话时出错了，请稍后再试。")
+            await deliver("处理对话时出错了，请稍后再试。")
             return
 
         messages = split_reply(
@@ -563,7 +569,7 @@ async def reply(
                     delay = next_reply_interval()
                     if delay > 0:
                         await asyncio.sleep(delay)
-                await send(message)
+                await deliver(message)
         except Exception:
             logger.exception("发送回复失败")
             _log_reply(
@@ -1001,7 +1007,8 @@ async def process_private_message(event: PrivateMessageEvent, send: Sender) -> N
                 f"[chat] reply session={session_key} "
                 f"replied=true reason=image_disabled tip_sent=true"
             )
-            await send(IMAGE_DISABLED_TIP)
+            result = await send(IMAGE_DISABLED_TIP)
+            record_result(session_key, result, IMAGE_DISABLED_TIP)
             return
         images = []
 
@@ -1023,16 +1030,16 @@ async def process_private_message(event: PrivateMessageEvent, send: Sender) -> N
 
 @private_chat.handle()
 async def handle_private_chat(event: PrivateMessageEvent, matcher: Matcher) -> None:
-    async def send(message: str) -> None:
-        await matcher.send(message)
+    async def send(message: str) -> Any:
+        return await matcher.send(message)
 
     await process_private_message(event, send)
 
 
 @group_chat.handle()
 async def handle_group_chat(bot: Bot, event: GroupMessageEvent) -> None:
-    async def send(message: str) -> None:
-        await bot.call_api(
+    async def send(message: str) -> Any:
+        return await bot.call_api(
             "send_group_msg",
             group_id=event.group_id,
             message=message,
@@ -1043,8 +1050,8 @@ async def handle_group_chat(bot: Bot, event: GroupMessageEvent) -> None:
 
 @group_poke.handle()
 async def handle_group_poke(bot: Bot, event: PokeNotifyEvent) -> None:
-    async def send(message: str) -> None:
-        await bot.call_api(
+    async def send(message: str) -> Any:
+        return await bot.call_api(
             "send_group_msg",
             group_id=event.group_id,
             message=message,
@@ -1055,8 +1062,8 @@ async def handle_group_poke(bot: Bot, event: PokeNotifyEvent) -> None:
 
 @private_poke.handle()
 async def handle_private_poke(bot: Bot, event: PokeNotifyEvent) -> None:
-    async def send(message: str) -> None:
-        await bot.call_api(
+    async def send(message: str) -> Any:
+        return await bot.call_api(
             "send_private_msg",
             user_id=event.user_id,
             message=message,

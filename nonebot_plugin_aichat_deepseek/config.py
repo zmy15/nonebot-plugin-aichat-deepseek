@@ -64,6 +64,8 @@ class Config(BaseModel):
     deepseek_tool_max_rounds: int = Field(default=3, ge=1)
     # 戳一戳工具与戳一戳事件响应
     deepseek_poke_enabled: bool = True
+    # 撤回自己最近发送的消息
+    deepseek_recall_enabled: bool = True
 
     # 长期记忆
     deepseek_memory_enabled: bool = True

@@ -28,6 +28,7 @@ from .get_user_prompt import TOOL as GET_USER_PROMPT_TOOL
 from .list_scheduled_tasks import TOOL as LIST_SCHEDULED_TASKS_TOOL
 from .poke_user import TOOL as POKE_USER_TOOL
 from .query_history import TOOL as QUERY_HISTORY_TOOL
+from .recall_message import TOOL as RECALL_MESSAGE_TOOL
 from .save_group_memory import TOOL as SAVE_GROUP_MEMORY_TOOL
 from .save_memory import TOOL as SAVE_MEMORY_TOOL
 from .schedule_task import TOOL as SCHEDULE_TASK_TOOL
@@ -56,6 +57,7 @@ ALL_TOOLS: tuple[Tool, ...] = (
     DESCRIBE_STICKER_TOOL,
     SEARCH_STICKERS_TOOL,
     SEND_STICKER_TOOL,
+    RECALL_MESSAGE_TOOL,
 )
 
 GROUP_TOOLS: tuple[Tool, ...] = (
@@ -74,6 +76,7 @@ def build_tool_definitions(
     include_memory: bool = True,
     include_custom_prompt: bool = False,
     include_poke: bool = False,
+    include_recall: bool = False,
     include_stickers: bool = False,
     include_search: bool = False,
     include_scheduler: bool = False,
@@ -85,6 +88,8 @@ def build_tool_definitions(
         groups.add("custom_prompt")
     if include_poke:
         groups.add("poke")
+    if include_recall:
+        groups.add("recall")
     if include_stickers:
         groups.add("stickers")
     if include_search:
@@ -99,6 +104,7 @@ def build_tool_definitions(
 TOOL_DEFINITIONS = build_tool_definitions(
     include_custom_prompt=True,
     include_poke=True,
+    include_recall=True,
     include_stickers=True,
     include_search=True,
     include_scheduler=True,
@@ -106,12 +112,14 @@ TOOL_DEFINITIONS = build_tool_definitions(
 
 
 def build_group_tool_definitions() -> list[dict[str, Any]]:
-    """群聊开放记忆、戳一戳、表情包和联网搜索工具。"""
+    """群聊开放记忆、戳一戳、撤回、表情包和联网搜索工具。"""
     groups: set[str] = set()
     if plugin_config.deepseek_memory_enabled:
         groups.update({"memory", "group_memory"})
     if plugin_config.deepseek_poke_enabled:
         groups.add("poke")
+    if plugin_config.deepseek_recall_enabled:
+        groups.add("recall")
     if plugin_config.deepseek_sticker_enabled:
         groups.add("stickers")
     if plugin_config.deepseek_search_enabled:
