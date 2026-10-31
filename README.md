@@ -11,6 +11,7 @@
 - 当前上下文持久化到 SQLite，启动时自动加载历史
 - 历史聊天记录复用同一数据库，模型可调用 `query_chat_history` 查询过去聊过什么
 - 长期记忆：自动保存用户信息、偏好、习惯等，并在后续对话中注入 system 指令
+- 单个用户自定义 system 提示词：通过工具保存专属人设、语气或回复风格
 - 连续消息聚合：用户分多次发送的一句话会合并；AI 判断不完整时先不回复，等提问完整
 - 回复抖动：首条回复前有随机停顿，多条回复之间也有随机间隔
 - 支持私聊图片理解：图片经 Files API 上传后以 `file_id` 交给 `deepseek-flash` 分析
@@ -48,6 +49,8 @@ DEEPSEEK_TOOL_MAX_ROUNDS=3
 DEEPSEEK_MEMORY_ENABLED=true
 DEEPSEEK_MEMORY_MAX_ITEMS=20
 DEEPSEEK_MEMORY_MAX_CHARS=1000
+DEEPSEEK_CUSTOM_PROMPT_ENABLED=true
+DEEPSEEK_CUSTOM_PROMPT_MAX_CHARS=2000
 DEEPSEEK_IMAGE_ENABLED=true
 DEEPSEEK_IMAGE_MAX_COUNT=4
 DEEPSEEK_IMAGE_EXPIRE_SECONDS=86400
@@ -76,6 +79,8 @@ DEEPSEEK_REPLY_INTERVAL=1.0
 | `DEEPSEEK_MEMORY_ENABLED` | `bool` | `True` | 是否启用长期记忆的保存、查询和注入 |
 | `DEEPSEEK_MEMORY_MAX_ITEMS` | `int` | `20` | 每次最多注入多少条长期记忆 |
 | `DEEPSEEK_MEMORY_MAX_CHARS` | `int` | `1000` | 注入长期记忆的字符预算 |
+| `DEEPSEEK_CUSTOM_PROMPT_ENABLED` | `bool` | `True` | 是否允许单个用户通过工具自定义 system 提示词 |
+| `DEEPSEEK_CUSTOM_PROMPT_MAX_CHARS` | `int` | `2000` | 单个用户自定义提示词的最大字符数 |
 | `DEEPSEEK_IMAGE_ENABLED` | `bool` | `True` | 是否启用私聊图片理解 |
 | `DEEPSEEK_IMAGE_MAX_BYTES` | `int` | `67108864` | 单张图片最大字节数（64 MiB） |
 | `DEEPSEEK_IMAGE_MAX_COUNT` | `int` | `4` | 单条消息最多处理几张图片 |
@@ -206,6 +211,7 @@ DEEPSEEK_REPLY_INTERVAL=1.0
 - `query_chat_history` 工具直接查询同一个 `messages` 表，因此可以检索到包括已压缩消息在内的完整历史。
 - `messages.created_at` 以 UTC 保存；工具输入和返回的时间统一按 UTC+8 解释和展示。
 - 长期记忆保存在同一数据库的 `memories` 表中，按 `session_key` 隔离。
+- 每个用户的自定义 system 提示词保存在同一数据库的 `user_prompts` 表中，同样按 `session_key` 隔离。
 - 数据库为明文存储，请自行做好备份和访问权限控制。
 
 ## 长期记忆
@@ -216,9 +222,26 @@ DEEPSEEK_REPLY_INTERVAL=1.0
 - 用户要求忘记时，模型可调用 `delete_user_memory`；需要查找更早记忆时调用 `search_user_memory`。
 - 记忆只属于当前 `session_key`，不会跨用户读取。
 
+## 自定义 system 提示词
+
+启用 `DEEPSEEK_CUSTOM_PROMPT_ENABLED` 后，每个私聊用户都可以通过自然语言让模型保存自己的 system 提示词：
+
+```text
+以后用简短、傲娇的语气回复我
+```
+
+模型会调用 `set_user_system_prompt` 保存。该提示词只对当前 `session_key` 生效，并会追加到 system 消息中的“【用户自定义指令】”部分，位置在输出格式要求之后、历史摘要和长期记忆之前。
+
+- 用户询问当前设定时，模型调用 `get_user_system_prompt`；
+- 用户要求恢复默认时，模型调用 `clear_user_system_prompt`；
+- 自定义提示词最多 `DEEPSEEK_CUSTOM_PROMPT_MAX_CHARS` 个字符，默认 2000；
+- 设置后从下一轮对话开始生效；
+- 修改或清除自定义提示词会让缓存前缀变化一次，属于正常现象；
+- 提示词只影响当前用户，不会影响其他私聊用户。
+
 ## 工具调用
 
-启用 `DEEPSEEK_TOOLS_ENABLED` 后，模型会获得以下工具（记忆相关工具还要求 `DEEPSEEK_MEMORY_ENABLED=true`）：
+启用 `DEEPSEEK_TOOLS_ENABLED` 后，模型会获得以下工具（记忆相关工具还要求 `DEEPSEEK_MEMORY_ENABLED=true`，自定义提示词工具要求 `DEEPSEEK_CUSTOM_PROMPT_ENABLED=true`）：
 
 | 工具 | 说明 |
 | --- | --- |
@@ -226,6 +249,9 @@ DEEPSEEK_REPLY_INTERVAL=1.0
 | `save_user_memory` | 保存用户长期信息、偏好等 |
 | `search_user_memory` | 搜索已保存的长期记忆 |
 | `delete_user_memory` | 删除某条长期记忆 |
+| `set_user_system_prompt` | 保存当前用户专属的 system 提示词 |
+| `get_user_system_prompt` | 查看当前用户的自定义提示词 |
+| `clear_user_system_prompt` | 清除当前用户的自定义提示词 |
 
 ### `query_chat_history`
 
@@ -244,7 +270,7 @@ DEEPSEEK_REPLY_INTERVAL=1.0
 - 只看时间：`start_time="2026-10-01", end_time="2026-10-07"`
 - 组合：`keyword="猫", start_time="2026-10-01", end_time="2026-10-07"`
 
-系统提示中会附带当前 UTC+8 时间，模型遇到“昨天”“上周”等相对时间时会先换算成具体日期再查询。
+系统提示中会附带当前 UTC+8 日期，模型遇到“昨天”“上周”等相对时间时会先换算成具体日期再查询。
 
 - 只能查询当前 `session_key` 对应的用户，不能跨用户查询。
 - 工具结果会裁剪过长的消息内容，避免占用过多上下文。
@@ -271,6 +297,22 @@ DEEPSEEK_REPLY_INTERVAL=1.0
 | 参数 | 类型 | 说明 |
 | --- | --- | --- |
 | `memory_id` | `integer` | 必填，要删除的记忆 ID，可从注入记忆的 `#id` 或搜索工具结果中获得 |
+
+### `set_user_system_prompt`
+
+| 参数 | 类型 | 说明 |
+| --- | --- | --- |
+| `content` | `string` | 必填，完整的自定义 system 提示词，最大长度由 `DEEPSEEK_CUSTOM_PROMPT_MAX_CHARS` 控制 |
+
+会覆盖当前用户原来的自定义提示词。
+
+### `get_user_system_prompt`
+
+无参数，返回当前用户已保存的自定义提示词；没有设置时 `content` 为 `null`。
+
+### `clear_user_system_prompt`
+
+无参数，清除当前用户的自定义提示词并恢复默认人设。
 
 ## 命令
 

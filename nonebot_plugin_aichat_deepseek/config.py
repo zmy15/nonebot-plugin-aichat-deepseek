@@ -35,6 +35,10 @@ class Config(BaseModel):
     deepseek_memory_max_items: int = Field(default=20, ge=1, le=50)
     deepseek_memory_max_chars: int = Field(default=1000, ge=1)
 
+    # 单个私聊用户的自定义 system 提示词
+    deepseek_custom_prompt_enabled: bool = True
+    deepseek_custom_prompt_max_chars: int = Field(default=2000, ge=1)
+
     # 图片理解（Files API）
     deepseek_image_enabled: bool = True
     deepseek_image_max_bytes: int = Field(

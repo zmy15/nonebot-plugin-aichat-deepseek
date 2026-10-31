@@ -22,6 +22,7 @@ __plugin_meta__ = PluginMetadata(
         "会长期记住用户的信息、偏好等，并在后续对话中自动使用。\n"
         "私聊可以直接发送图片，由 deepseek-flash 进行图像理解。\n"
         "连续发送的多条消息会先聚合，判断完整后再回复。\n"
+        "也可以用自然语言设置只属于自己的 system 提示词或人设。\n"
         "发送 /ping 可检查插件是否在线。"
     ),
     type="application",

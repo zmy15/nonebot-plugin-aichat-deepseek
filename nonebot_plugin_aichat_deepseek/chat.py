@@ -190,8 +190,9 @@ def _format_error(exc: DeepSeekError) -> str:
 def _build_system_prompt(
     summary: str = "",
     memories: list[dict[str, Any]] | None = None,
+    user_prompt: str = "",
 ) -> str:
-    """在用户配置的人设之后追加输出约束、摘要和长期记忆。"""
+    """在用户配置的人设之后追加输出约束、自定义指令、摘要和长期记忆。"""
     persona = plugin_config.deepseek_system_prompt.strip()
     delimiter = plugin_config.deepseek_split_delimiter.strip() or "|||"
     rules = (
@@ -225,7 +226,24 @@ def _build_system_prompt(
             "需要查找更早的记忆时调用 search_user_memory。"
         )
 
+    if (
+        plugin_config.deepseek_tools_enabled
+        and plugin_config.deepseek_custom_prompt_enabled
+    ):
+        rules += (
+            "\n用户明确要求改变人设、语气、回复风格或记住专属设定时，"
+            "调用 set_user_system_prompt 保存；"
+            "询问当前设定时调用 get_user_system_prompt；"
+            "要求恢复默认时调用 clear_user_system_prompt。"
+        )
+
     prompt = f"{persona}\n\n{rules}" if persona else rules
+    custom = user_prompt.strip()
+    if plugin_config.deepseek_custom_prompt_enabled and custom:
+        prompt = (
+            f"{prompt}\n\n【用户自定义指令】\n{custom}\n"
+            "请在不违反上面的输出格式要求的前提下优先遵守这些指令。"
+        )
     if summary:
         prompt = f"{prompt}\n\n【历史对话摘要】\n{summary}"
 
@@ -261,11 +279,16 @@ def _build_request_messages(
             session_key,
             limit=plugin_config.deepseek_memory_max_items,
         )
+    user_prompt = (
+        store.get_user_prompt(session_key)
+        if plugin_config.deepseek_custom_prompt_enabled
+        else ""
+    )
     messages.insert(
         0,
         {
             "role": "system",
-            "content": _build_system_prompt(summary, memories),
+            "content": _build_system_prompt(summary, memories, user_prompt),
         },
     )
     messages.append({"role": "user", "content": user_content})
@@ -398,7 +421,10 @@ async def _generate_reply_locked(
         answer = await client.chat_with_tools(
             messages,
             tools=build_tool_definitions(
-                include_memory=plugin_config.deepseek_memory_enabled
+                include_memory=plugin_config.deepseek_memory_enabled,
+                include_custom_prompt=(
+                    plugin_config.deepseek_custom_prompt_enabled
+                ),
             ),
             tool_runner=run_tool,
             max_tool_rounds=plugin_config.deepseek_tool_max_rounds,

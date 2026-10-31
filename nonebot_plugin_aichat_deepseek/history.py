@@ -49,6 +49,12 @@ CREATE TABLE IF NOT EXISTS memories (
 
 CREATE INDEX IF NOT EXISTS idx_memories_session
     ON memories (session_key, updated_at, id);
+
+CREATE TABLE IF NOT EXISTS user_prompts (
+    session_key TEXT PRIMARY KEY,
+    content TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 """
 
 
@@ -78,6 +84,7 @@ class ConversationStore:
         self._batch_messages = max(1, batch_messages)
         self._messages: dict[str, list[ChatMessage]] = {}
         self._summaries: dict[str, str] = {}
+        self._user_prompts: dict[str, str] = {}
         self._locks: dict[str, asyncio.Lock] = {}
         self._conn = self._connect(db_path)
         self._init_schema()
@@ -116,6 +123,10 @@ class ConversationStore:
             "SELECT session_key, content FROM summaries"
         ):
             self._summaries[session_key] = content
+        for session_key, content in self._conn.execute(
+            "SELECT session_key, content FROM user_prompts"
+        ):
+            self._user_prompts[session_key] = content
 
     def lock(self, key: str) -> asyncio.Lock:
         """获取某个会话的锁，避免同一用户并发消息打乱上下文。"""
@@ -170,6 +181,37 @@ class ConversationStore:
 
     def get_summary(self, key: str) -> str:
         return self._summaries.get(key, "")
+
+    def get_user_prompt(self, key: str) -> str:
+        """返回当前用户自定义的 system 提示词，没有则为空字符串。"""
+        return self._user_prompts.get(key, "")
+
+    def set_user_prompt(self, key: str, content: str) -> None:
+        """保存或覆盖某个私聊用户的自定义 system 提示词。"""
+        content = content.strip()
+        if not content:
+            raise ValueError("自定义提示词不能为空")
+
+        now = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
+        with self._conn:
+            self._conn.execute(
+                "INSERT INTO user_prompts (session_key, content, updated_at) "
+                "VALUES (?, ?, ?) "
+                "ON CONFLICT(session_key) DO UPDATE SET "
+                "content = excluded.content, "
+                "updated_at = excluded.updated_at",
+                (key, content, now),
+            )
+        self._user_prompts[key] = content
+
+    def clear_user_prompt(self, key: str) -> bool:
+        """删除某个用户的自定义 system 提示词。"""
+        with self._conn:
+            cursor = self._conn.execute(
+                "DELETE FROM user_prompts WHERE session_key = ?", (key,)
+            )
+        self._user_prompts.pop(key, None)
+        return cursor.rowcount > 0
 
     def add_memory(
         self,
@@ -367,8 +409,12 @@ class ConversationStore:
             self._conn.execute(
                 "DELETE FROM memories WHERE session_key = ?", (key,)
             )
+            self._conn.execute(
+                "DELETE FROM user_prompts WHERE session_key = ?", (key,)
+            )
         self._messages.pop(key, None)
         self._summaries.pop(key, None)
+        self._user_prompts.pop(key, None)
 
     def close(self) -> None:
         self._conn.close()

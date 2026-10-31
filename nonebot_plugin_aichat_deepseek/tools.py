@@ -19,6 +19,7 @@ from typing import Any
 
 from nonebot import logger
 
+from .config import plugin_config
 from .formatting import strip_markdown
 from .history import UTC8, ConversationStore
 
@@ -26,6 +27,9 @@ TOOL_QUERY_HISTORY = "query_chat_history"
 TOOL_SAVE_MEMORY = "save_user_memory"
 TOOL_SEARCH_MEMORY = "search_user_memory"
 TOOL_DELETE_MEMORY = "delete_user_memory"
+TOOL_SET_USER_PROMPT = "set_user_system_prompt"
+TOOL_GET_USER_PROMPT = "get_user_system_prompt"
+TOOL_CLEAR_USER_PROMPT = "clear_user_system_prompt"
 
 MEMORY_CATEGORIES = (
     "profile",
@@ -169,15 +173,81 @@ MEMORY_TOOL_DEFINITIONS = [
     DELETE_MEMORY_TOOL,
 ]
 
+SET_USER_PROMPT_TOOL: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": TOOL_SET_USER_PROMPT,
+        "description": (
+            "设置当前私聊用户专属的 system 提示词，用来改变人设、语气、"
+            "回复风格或长期设定。"
+            "当用户明确说“以后用……语气回复”“记住我的设定”“按这个风格来”时调用。"
+            "会覆盖该用户之前的自定义提示词，只影响当前用户。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "content": {
+                    "type": "string",
+                    "description": (
+                        "完整的自定义 system 提示词，简洁明确，"
+                        "例如：以后用简短、傲娇的语气回复我。"
+                    ),
+                },
+            },
+            "required": ["content"],
+        },
+    },
+}
 
-def build_tool_definitions(*, include_memory: bool = True) -> list[dict[str, Any]]:
+GET_USER_PROMPT_TOOL: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": TOOL_GET_USER_PROMPT,
+        "description": "查看当前私聊用户已设置的自定义 system 提示词。",
+        "parameters": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+    },
+}
+
+CLEAR_USER_PROMPT_TOOL: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": TOOL_CLEAR_USER_PROMPT,
+        "description": (
+            "清除当前私聊用户的自定义 system 提示词，恢复默认人设和回复风格。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+    },
+}
+
+CUSTOM_PROMPT_TOOL_DEFINITIONS = [
+    SET_USER_PROMPT_TOOL,
+    GET_USER_PROMPT_TOOL,
+    CLEAR_USER_PROMPT_TOOL,
+]
+
+
+def build_tool_definitions(
+    *,
+    include_memory: bool = True,
+    include_custom_prompt: bool = False,
+) -> list[dict[str, Any]]:
     tools = [QUERY_HISTORY_TOOL]
     if include_memory:
         tools.extend(MEMORY_TOOL_DEFINITIONS)
+    if include_custom_prompt:
+        tools.extend(CUSTOM_PROMPT_TOOL_DEFINITIONS)
     return tools
 
 
-TOOL_DEFINITIONS = build_tool_definitions()
+TOOL_DEFINITIONS = build_tool_definitions(include_custom_prompt=True)
 
 _DATE_ONLY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
@@ -363,6 +433,62 @@ def _execute_delete_memory(
     )
 
 
+def _execute_set_user_prompt(
+    args: dict[str, Any],
+    session_key: str,
+    store: ConversationStore,
+) -> str:
+    content = args.get("content")
+    if not isinstance(content, str):
+        return _error("content 必须是字符串")
+
+    content = content.strip()
+    if not content:
+        return _error("自定义提示词不能为空")
+
+    max_chars = plugin_config.deepseek_custom_prompt_max_chars
+    if len(content) > max_chars:
+        return _error(f"自定义提示词不能超过 {max_chars} 个字符")
+
+    store.set_user_prompt(session_key, content)
+    return json.dumps(
+        {
+            "saved": True,
+            "content": content,
+            "length": len(content),
+        },
+        ensure_ascii=False,
+    )
+
+
+def _execute_get_user_prompt(
+    args: dict[str, Any],
+    session_key: str,
+    store: ConversationStore,
+) -> str:
+    del args
+    content = store.get_user_prompt(session_key)
+    return json.dumps(
+        {
+            "content": content or None,
+            "length": len(content),
+        },
+        ensure_ascii=False,
+    )
+
+
+def _execute_clear_user_prompt(
+    args: dict[str, Any],
+    session_key: str,
+    store: ConversationStore,
+) -> str:
+    del args
+    return json.dumps(
+        {"cleared": store.clear_user_prompt(session_key)},
+        ensure_ascii=False,
+    )
+
+
 async def execute_tool(
     name: str,
     arguments: str | dict[str, Any],
@@ -387,6 +513,14 @@ async def execute_tool(
         TOOL_SEARCH_MEMORY: _execute_search_memory,
         TOOL_DELETE_MEMORY: _execute_delete_memory,
     }
+    if plugin_config.deepseek_custom_prompt_enabled:
+        handlers.update(
+            {
+                TOOL_SET_USER_PROMPT: _execute_set_user_prompt,
+                TOOL_GET_USER_PROMPT: _execute_get_user_prompt,
+                TOOL_CLEAR_USER_PROMPT: _execute_clear_user_prompt,
+            }
+        )
     handler = handlers.get(name)
     if handler is None:
         logger.warning(
