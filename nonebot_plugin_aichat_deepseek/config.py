@@ -4,23 +4,40 @@
 
     DEEPSEEK_API_KEY=sk-xxxxxxxx
     DEEPSEEK_API_BASE=https://api.deepseek.com
-    DEEPSEEK_MODEL=deepseek-chat
+    DEEPSEEK_MODEL=deepseek-flash
 
 为满足“零配置可加载”要求，DEEPSEEK_API_KEY 允许缺省，
-插件仍能正常导入，仅在调用 API 时给出提示。
+插件仍能正常导入，仅在私聊调用 API 时提示未配置。
 """
 
 from nonebot import get_plugin_config
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class Config(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
+    # API 连接
     deepseek_api_key: str | None = None
     deepseek_api_base: str = "https://api.deepseek.com"
-    deepseek_model: str = "deepseek-chat"
-    deepseek_timeout: float = 60.0
+    deepseek_model: str = "deepseek-flash"
+    deepseek_timeout: float = Field(default=60.0, gt=0)
+
+    # 生成参数
+    deepseek_system_prompt: str = (
+        "你是一个乐于助人的 AI 助手，请使用简体中文回答用户的问题。"
+    )
+    deepseek_temperature: float = Field(default=1.0, ge=0, le=2)
+    deepseek_max_tokens: int | None = Field(default=None, ge=1)
+    # None 表示不发送 thinking 字段，使用服务端默认值；
+    # True / False 分别显式开启 / 关闭思考模式。
+    deepseek_thinking: bool | None = None
+
+    # 对话上下文：保留最近多少轮（一问一答为一轮），0 表示不保留上下文
+    deepseek_history_turns: int = Field(default=5, ge=0)
+
+    # 单条回复的最大字符数，超出后分段发送（QQ 单条消息有字节上限，不宜过大）
+    deepseek_reply_max_length: int = Field(default=1000, ge=1)
 
 
 plugin_config = get_plugin_config(Config)
