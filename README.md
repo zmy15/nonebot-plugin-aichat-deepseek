@@ -18,6 +18,8 @@
 - 回复抖动：首条回复前有随机停顿，多条回复之间也有随机间隔
 - 支持私聊图片理解：图片经 Files API 上传后以 `file_id` 交给 `deepseek-flash` 分析
 - 联网搜索：模型可调用 `web_search` 查询实时信息、新闻等网页内容
+- 定时主动聊天：AI 可自行判断并安排稍后找用户说话，也可以定时戳一戳
+- 未回复追问：AI 提问后用户一段时间没回复，会自动再补一句
 - 表情包收藏：自动把私聊收到的表情包存入本地表情库，记录含义和标签
 - 模型可调用工具按含义查询表情包，并通过 OneBot 图片消息发送
 - 未压缩消息超过 30 轮时，自动把最早 20 条消息压缩成摘要，放到 system 指令之后
@@ -63,6 +65,11 @@ DEEPSEEK_IMAGE_MAX_COUNT=4
 DEEPSEEK_IMAGE_EXPIRE_SECONDS=86400
 DEEPSEEK_SEARCH_ENABLED=true
 DEEPSEEK_SEARCH_DEFAULT_COUNT=5
+DEEPSEEK_SCHEDULER_ENABLED=true
+DEEPSEEK_SCHEDULER_MAX_DELAY_SECONDS=604800
+DEEPSEEK_SCHEDULER_MAX_JOBS=5
+DEEPSEEK_FOLLOWUP_ENABLED=true
+DEEPSEEK_FOLLOWUP_DELAY_SECONDS=600
 DEEPSEEK_STICKER_ENABLED=true
 DEEPSEEK_STICKER_DIR=data/nonebot_plugin_aichat_deepseek/stickers
 DEEPSEEK_STICKER_MAX_COUNT=4
@@ -102,6 +109,11 @@ DEEPSEEK_REPLY_INTERVAL=1.0
 | `DEEPSEEK_IMAGE_EXPIRE_SECONDS` | `int` | `86400` | 上传文件有效期（秒），`0` 表示永久有效 |
 | `DEEPSEEK_SEARCH_ENABLED` | `bool` | `True` | 是否启用 `web_search` 联网搜索工具 |
 | `DEEPSEEK_SEARCH_DEFAULT_COUNT` | `int` | `5` | 搜索工具默认返回条数，1–50 |
+| `DEEPSEEK_SCHEDULER_ENABLED` | `bool` | `True` | 是否启用定时任务相关工具 |
+| `DEEPSEEK_SCHEDULER_MAX_DELAY_SECONDS` | `int` | `604800` | 单个定时任务最长延迟秒数，默认 7 天 |
+| `DEEPSEEK_SCHEDULER_MAX_JOBS` | `int` | `5` | 每个用户最多同时保留的定时任务数 |
+| `DEEPSEEK_FOLLOWUP_ENABLED` | `bool` | `True` | 提问后用户未回复时是否自动补一句 |
+| `DEEPSEEK_FOLLOWUP_DELAY_SECONDS` | `int` | `600` | 用户多久没回复后补一句，默认 10 分钟 |
 | `DEEPSEEK_STICKER_ENABLED` | `bool` | `True` | 是否自动收藏表情包并启用表情包工具 |
 | `DEEPSEEK_STICKER_DIR` | `str` | `data/nonebot_plugin_aichat_deepseek/stickers` | 表情包图片保存目录，相对路径基于机器人启动目录 |
 | `DEEPSEEK_STICKER_MAX_COUNT` | `int` | `4` | 单条消息最多自动收藏几个表情包 |
@@ -266,6 +278,65 @@ DEEPSEEK_REPLY_INTERVAL=1.0
 - 表情包文件不会因为 `/清空` 被删除；
 - 如果使用的 OneBot 实现没有上报 `sub_type` 等字段，可以对机器人说“记住这个表情包”强制收藏。
 
+## 定时任务
+
+启用 `DEEPSEEK_SCHEDULER_ENABLED` 后，模型可以自己决定在合适的时间主动找用户聊天，不需要用户明确说“定时”或“提醒我”：
+
+- `action=chat`：到点后由 AI 根据上下文、人设和记忆主动生成一条消息，像真人一样开启话题；
+- `action=poke`：到点后戳一戳当前私聊用户。
+
+例如用户说要去忙、吃饭、睡觉、出门，或聊天告一段落时，模型可以主动安排稍后关心或问候。`action=chat` 可以附带 `topic` 说明这次想聊什么，例如“关心用户喝水”“问问他今天过得怎么样”；不填则自由发挥，不会发送固定文本。
+
+触发方式二选一：
+
+- `delay_seconds`：多少秒后执行，最长 `DEEPSEEK_SCHEDULER_MAX_DELAY_SECONDS`（默认 7 天）；
+- `run_at`：UTC+8 的绝对时间，例如 `2026-11-01 09:00:00`。
+
+说明：
+
+- 只作用于当前私聊用户，不能指定其他用户；
+- 每个用户同时最多保留 `DEEPSEEK_SCHEDULER_MAX_JOBS` 个任务（默认 5）；
+- 依赖 [nonebot-plugin-apscheduler](https://github.com/nonebot/plugin-apscheduler)，插件已声明依赖；如果手动部署，请确保安装：`nb plugin install nonebot-plugin-apscheduler` 或 `pip install nonebot-plugin-apscheduler`；
+- 使用 APScheduler 默认的内存 JobStore，机器人重启后未执行的任务会丢失；
+- 任务到点后会重新走模型调用，生成内容再通过 OneBot API 发送，不依赖事件响应器。
+
+示例：
+
+```text
+用户：10 分钟后主动来找我聊一句
+AI：调用 schedule_task(action="chat", topic="关心用户喝水", delay_seconds=600)
+
+用户：明天早上 9 点戳我一下
+AI：调用 schedule_task(action="poke", run_at="2026-11-01 09:00:00")
+```
+
+任务管理：
+
+- `list_scheduled_tasks`：查看当前用户已创建的任务、类型、话题和下次执行时间；
+- `cancel_scheduled_task`：按 `job_id` 取消当前用户的任务；
+- `update_scheduled_task`：按 `job_id` 修改执行时间、`chat` / `poke` 类型或话题。
+
+这三个工具都只允许操作当前 `session_key` 下的任务，不能查看或取消其他用户的任务。
+
+## 未回复追问
+
+启用 `DEEPSEEK_FOLLOWUP_ENABLED` 后，如果 AI 刚才的消息里问了用户问题，而用户在 `DEEPSEEK_FOLLOWUP_DELAY_SECONDS`（默认 600 秒）内没有回复，插件会让 AI 再补一句自然的追问。
+
+- 只针对看起来像提问的回复（含问号、以“吗/呢/嘛/么”结尾，或包含“怎么样/要不要/在吗”等）；
+- 用户发消息或戳机器人会立即取消待执行的追问；
+- 每次提问最多补一句，不会无限追问；
+- 追问也是重新调用模型生成，不是固定文案；
+- 依赖 `DEEPSEEK_SCHEDULER_ENABLED=true` 和 APScheduler；
+- 任务保存在内存中，重启后会丢失。
+
+例如：
+
+```text
+AI：今天面试怎么样？
+（10 分钟后用户还没回复）
+AI：还在忙吗？就是有点惦记你面试的结果。
+```
+
 ## 数据存储与上下文压缩
 
 - 当前上下文数据库默认位于 `data/nonebot_plugin_aichat_deepseek/chat.db`，启动时自动创建表并加载未压缩的历史消息和摘要。
@@ -322,7 +393,7 @@ DEEPSEEK_REPLY_INTERVAL=1.0
 
 ## 工具调用
 
-启用 `DEEPSEEK_TOOLS_ENABLED` 后，模型会获得以下工具（记忆相关工具还要求 `DEEPSEEK_MEMORY_ENABLED=true`，自定义提示词工具要求 `DEEPSEEK_CUSTOM_PROMPT_ENABLED=true`，表情包工具要求 `DEEPSEEK_STICKER_ENABLED=true`，联网搜索工具要求 `DEEPSEEK_SEARCH_ENABLED=true`）：
+启用 `DEEPSEEK_TOOLS_ENABLED` 后，模型会获得以下工具（记忆相关工具还要求 `DEEPSEEK_MEMORY_ENABLED=true`，自定义提示词工具要求 `DEEPSEEK_CUSTOM_PROMPT_ENABLED=true`，表情包工具要求 `DEEPSEEK_STICKER_ENABLED=true`，联网搜索工具要求 `DEEPSEEK_SEARCH_ENABLED=true`，定时任务工具要求 `DEEPSEEK_SCHEDULER_ENABLED=true`）：
 
 | 工具 | 说明 |
 | --- | --- |
@@ -335,6 +406,10 @@ DEEPSEEK_REPLY_INTERVAL=1.0
 | `get_user_system_prompt` | 查看当前用户的自定义提示词 |
 | `clear_user_system_prompt` | 清除当前用户的自定义提示词 |
 | `poke_user` | 戳一戳当前私聊用户 |
+| `schedule_task` | 创建定时主动聊天或定时戳一戳 |
+| `list_scheduled_tasks` | 查看当前用户已创建的定时任务 |
+| `cancel_scheduled_task` | 取消当前用户的一个定时任务 |
+| `update_scheduled_task` | 修改当前用户定时任务的时间、类型或话题 |
 | `describe_sticker` | 记录或更新表情包的含义 |
 | `search_stickers` | 按含义或标签查询表情包 |
 | `send_sticker` | 查询并发送一个表情包 |
@@ -415,6 +490,41 @@ DEEPSEEK_REPLY_INTERVAL=1.0
 
 无参数，戳一戳当前私聊用户。用户要求时调用，对话气氛合适时也会主动戳一戳；用户戳你时也可以戳回去。优先调用 `friend_poke`，失败时尝试 `send_poke`。
 
+### `schedule_task`
+
+| 参数 | 类型 | 说明 |
+| --- | --- | --- |
+| `action` | `string` | 必填，`chat` 到点后 AI 主动聊天，`poke` 戳一戳 |
+| `topic` | `string` | 可选，这次主动聊天想聊什么，例如“关心用户喝水”，最多 200 字 |
+| `delay_seconds` | `integer` | 可选，多少秒后执行，与 `run_at` 二选一 |
+| `run_at` | `string` | 可选，UTC+8 的绝对执行时间，与 `delay_seconds` 二选一 |
+
+`action=chat` 到点后会重新调用模型，根据上下文、人设和记忆生成消息，不是发送固定文本。模型可以自己决定何时安排，不需要用户明确提出定时要求；但也不要每次对话都安排。只作用于当前私聊用户。任务保存在 APScheduler 默认的内存 JobStore 中，机器人重启后会丢失；每个用户最多同时保留 `DEEPSEEK_SCHEDULER_MAX_JOBS` 个任务。
+
+### `list_scheduled_tasks`
+
+无参数，返回当前用户的任务列表，包含 `job_id`、`action`、`topic`、`run_at`，以及当前上限 `max_jobs`。只显示当前 `session_key` 下的任务。
+
+### `cancel_scheduled_task`
+
+| 参数 | 类型 | 说明 |
+| --- | --- | --- |
+| `job_id` | `string` | 必填，要取消的任务 ID，可从 `schedule_task` 结果或 `list_scheduled_tasks` 获取 |
+
+只能取消当前用户自己的任务；任务不存在或不属于当前用户时返回错误。
+
+### `update_scheduled_task`
+
+| 参数 | 类型 | 说明 |
+| --- | --- | --- |
+| `job_id` | `string` | 必填，要修改的任务 ID |
+| `action` | `string` | 可选，新的类型：`chat` / `poke` |
+| `topic` | `string` | 可选，新的话题，最多 200 字 |
+| `delay_seconds` | `integer` | 可选，从当前时间起多少秒后执行，与 `run_at` 二选一 |
+| `run_at` | `string` | 可选，新的绝对执行时间，与 `delay_seconds` 二选一 |
+
+至少提供一个要更新的字段。只修改时间/类型/话题，不会改变任务归属；只能修改当前用户自己的任务。
+
 ### `describe_sticker`
 
 | 参数 | 类型 | 说明 |
@@ -458,7 +568,8 @@ DEEPSEEK_REPLY_INTERVAL=1.0
 - `nonebot_plugin_aichat_deepseek/tools/<tool>.py`：每个工具独立模块，包含 `DEFINITION`、`execute()` 和 `TOOL`；
 - `tools/registry.py`：汇总工具、按开关过滤定义、统一分发执行；
 - `tools/base.py`：`Tool` 描述对象、`ToolContext` 和参数处理工具；
-- `tools/__init__.py`：保持 `execute_tool` / `build_tool_definitions` 等原有入口稳定。
+- `tools/__init__.py`：保持 `execute_tool` / `build_tool_definitions` 等原有入口稳定；
+- `scheduled_tasks.py`：加载 APScheduler、注册任务，到点后调用模型生成主动消息或戳一戳。
 
 新增工具时，只需新增一个工具模块并加入 `registry.ALL_TOOLS`，不需要修改其他工具的实现。
 
@@ -484,6 +595,8 @@ pytest
 - [OneBot 11 API](https://github.com/botuniverse/onebot-11/blob/master/api/README.md)
 - [DeepSeek 网页搜索 API](https://api-docs.deepseek.com/zh-cn/api/search)
 - [DeepSeek 网页搜索与抓取指南](https://api-docs.deepseek.com/zh-cn/guides/search)
+- [NoneBot 定时任务](https://nonebot.dev/docs/best-practice/scheduler)
+- [nonebot-plugin-apscheduler](https://github.com/nonebot/plugin-apscheduler)
 
 ## 许可协议
 

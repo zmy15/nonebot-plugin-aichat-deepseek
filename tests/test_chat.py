@@ -426,6 +426,9 @@ def test_system_prompt_contains_output_rules() -> None:
     assert "优先分成多条" in prompt
     assert "query_chat_history" in prompt
     assert "web_search" in prompt
+    assert "schedule_task" in prompt
+    assert "list_scheduled_tasks" in prompt
+    assert "不需要用户" in prompt
     assert "来源链接" not in prompt
     assert "save_user_memory" in prompt
     assert "UTC+8" in prompt
@@ -642,6 +645,128 @@ async def test_reply_tool_can_web_search(
     assert "今日新闻" in fake.tool_result
     assert "https://example.com/news" in fake.tool_result
     assert sent == ["查到一条新闻"]
+
+
+async def test_reply_tool_can_schedule_task(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from nonebot_plugin_aichat_deepseek import chat as chat_module
+
+    class FakeScheduler:
+        def __init__(self) -> None:
+            self.added: list[dict] = []
+
+        def get_jobs(self):
+            return []
+
+        def add_job(self, func, trigger, **kwargs) -> None:
+            self.added.append(
+                {"func": func, "trigger": trigger, **kwargs}
+            )
+
+    class SchedulerClient:
+        configured = True
+
+        def __init__(self) -> None:
+            self.tool_result = ""
+            self.tool_names: list[str] = []
+
+        async def chat_with_tools(
+            self,
+            messages,
+            *,
+            tools,
+            tool_runner,
+            max_tool_rounds,
+            **kwargs,
+        ) -> str:
+            self.tool_names = [
+                tool["function"]["name"] for tool in tools
+            ]
+            self.tool_result = await tool_runner(
+                "schedule_task",
+                '{"action":"chat","delay_seconds":60,'
+                '"topic":"关心一下"}',
+            )
+            return "好的"
+
+    scheduler = FakeScheduler()
+    fake = SchedulerClient()
+    monkeypatch.setattr(chat_module, "client", fake)
+    monkeypatch.setattr(chat_module, "get_scheduler", lambda: scheduler)
+    chat_module.store.clear("11:11")
+
+    sent: list[str] = []
+
+    async def send(message: str) -> None:
+        sent.append(message)
+
+    await chat_module.reply("11:11", "一分钟后戳我", send)
+
+    assert "schedule_task" in fake.tool_names
+    assert "scheduled" in fake.tool_result
+    assert scheduler.added[0]["kwargs"]["action"] == "chat"
+    assert scheduler.added[0]["kwargs"]["topic"] == "关心一下"
+    assert scheduler.added[0]["kwargs"]["user_id"] == 11
+    assert sent == ["好的"]
+
+
+async def test_proactive_reply_generates_and_archives(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from nonebot_plugin_aichat_deepseek import chat as chat_module
+
+    class FakeScheduler:
+        def __init__(self) -> None:
+            self.added: list[dict] = []
+            self.removed: list[str] = []
+
+        def add_job(self, func, trigger, **kwargs) -> None:
+            self.added.append(
+                {"func": func, "trigger": trigger, **kwargs}
+            )
+
+        def remove_job(self, job_id: str) -> None:
+            self.removed.append(job_id)
+
+    class ProactiveClient:
+        configured = True
+
+        def __init__(self) -> None:
+            self.messages: list[dict] | None = None
+
+        async def chat_with_tools(self, messages, **kwargs) -> str:
+            self.messages = messages
+            return "在忙吗"
+
+    scheduler = FakeScheduler()
+    fake = ProactiveClient()
+    monkeypatch.setattr(chat_module, "client", fake)
+    monkeypatch.setattr(
+        chat_module, "get_scheduler", lambda: scheduler
+    )
+    chat_module.store.clear("12:12")
+
+    sent: list[str] = []
+
+    async def send(message: str) -> None:
+        sent.append(message)
+
+    await chat_module.proactive_reply("12:12", "关心一下", send)
+
+    assert sent == ["在忙吗"]
+    assert fake.messages is not None
+    prompt = fake.messages[-1]["content"]
+    assert "主动找用户聊天" in prompt
+    assert "关心一下" in prompt
+
+    stored = chat_module.store.build_messages("12:12")
+    assert stored[0]["content"] == "（AI 主动找用户聊天）"
+    assert stored[1]["content"] == "在忙吗"
+
+    assert len(scheduler.added) == 1
+    assert scheduler.added[0]["id"] == "aichat-followup:12:12"
+    assert scheduler.added[0]["kwargs"]["user_id"] == 12
 
 
 async def test_reply_with_image_uploads_and_sends(

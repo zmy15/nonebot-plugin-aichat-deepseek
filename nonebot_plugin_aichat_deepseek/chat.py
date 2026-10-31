@@ -24,6 +24,11 @@ from .data_source import ChatMessage, DeepSeekClient, DeepSeekError
 from .formatting import split_reply, strip_markdown
 from .history import UTC8, ConversationStore
 from .images import ImageError, fetch_image
+from .scheduled_tasks import (
+    cancel_followup,
+    get_scheduler,
+    schedule_followup,
+)
 from .stickers import (
     build_sticker_prompt_note,
     is_sticker_image,
@@ -211,6 +216,74 @@ def _format_error(exc: DeepSeekError) -> str:
     return f"DeepSeek 请求失败：{detail}"
 
 
+_QUESTION_MARKERS = (
+    "怎么样",
+    "好不好",
+    "要不要",
+    "是不是",
+    "有没有",
+    "在吗",
+    "忙吗",
+    "吃了吗",
+)
+
+
+def _looks_like_question(text: str) -> bool:
+    text = text.strip()
+    if not text:
+        return False
+    if "?" in text or "？" in text:
+        return True
+    if text.endswith(("吗", "呢", "嘛", "么")):
+        return True
+    return any(marker in text for marker in _QUESTION_MARKERS)
+
+
+def _cancel_pending_followup(session_key: str) -> None:
+    cancel_followup(get_scheduler(), session_key)
+
+
+def _maybe_schedule_followup(session_key: str, answer: str) -> None:
+    if not (
+        plugin_config.deepseek_scheduler_enabled
+        and plugin_config.deepseek_followup_enabled
+    ):
+        return
+
+    scheduler = get_scheduler()
+    if scheduler is None:
+        return
+
+    if not _looks_like_question(answer):
+        cancel_followup(scheduler, session_key)
+        return
+
+    self_id, separator, user_id = session_key.partition(":")
+    if not separator or not self_id or not user_id:
+        return
+    try:
+        target_id = int(user_id)
+    except ValueError:
+        return
+
+    token = uuid.uuid4().hex
+    try:
+        schedule_followup(
+            scheduler,
+            session_key=session_key,
+            self_id=self_id,
+            user_id=target_id,
+            delay_seconds=plugin_config.deepseek_followup_delay_seconds,
+            token=token,
+        )
+        logger.info(
+            f"[chat] followup scheduled session={session_key} "
+            f"delay={plugin_config.deepseek_followup_delay_seconds}"
+        )
+    except Exception:
+        logger.exception("安排未回复追问失败")
+
+
 def _build_system_prompt(
     summary: str = "",
     memories: list[dict[str, Any]] | None = None,
@@ -258,6 +331,37 @@ def _build_system_prompt(
             "\n当用户询问实时信息、新闻、价格、天气、最近发生的事件，"
             "或你不确定、需要最新资料时，调用 web_search 搜索网页；"
             "不要凭记忆编造实时信息。"
+        )
+
+    if (
+        plugin_config.deepseek_tools_enabled
+        and plugin_config.deepseek_scheduler_enabled
+    ):
+        rules += (
+            "\n每次回复时都主动判断：是否适合在稍后找用户聊天或戳一戳，"
+            "不需要用户提出“定时”或“提醒我”的要求。"
+            "例如用户说要去忙、吃饭、睡觉、出门，"
+            "或聊天告一段落时，可以调用 schedule_task "
+            "安排稍后关心或问候；"
+            "不要每次对话都安排，也不要连续安排多个。"
+            "到点后由你根据上下文、人设和记忆主动生成消息，"
+            "不是发送固定文本。只作用于当前私聊用户，"
+            "不要编造任务已创建，任务保存在内存中，"
+            "机器人重启后会丢失。"
+            "用户要查看、取消或修改定时任务时，分别调用 "
+            "list_scheduled_tasks、cancel_scheduled_task、"
+            "update_scheduled_task；只能操作当前用户自己的任务。"
+        )
+
+    if (
+        plugin_config.deepseek_tools_enabled
+        and plugin_config.deepseek_scheduler_enabled
+        and plugin_config.deepseek_followup_enabled
+    ):
+        rules += (
+            "\n当你向用户提问后，如果用户一段时间没有回复，"
+            "插件会自动让你再补一句；追问由插件自动处理，"
+            "不需要你调用 schedule_task 另外安排。"
         )
 
     if (
@@ -420,6 +524,7 @@ async def _generate_reply_locked(
     text: str,
     images: Sequence[Mapping[str, Any]] | None = None,
     usage: dict[str, int] | None = None,
+    history_user_text: str | None = None,
 ) -> str:
     usage_total = usage if usage is not None else {}
 
@@ -505,6 +610,9 @@ async def _generate_reply_locked(
     else:
         messages = _build_request_messages(session_key, text)
 
+    if history_user_text is not None:
+        history_text = history_user_text
+
     if plugin_config.deepseek_tools_enabled:
 
         async def run_tool(name: str, arguments: str) -> str:
@@ -514,6 +622,7 @@ async def _generate_reply_locked(
                 session_key,
                 store,
                 search_web=getattr(client, "search", None),
+                get_scheduler=get_scheduler,
             )
 
         answer = await client.chat_with_tools(
@@ -526,6 +635,7 @@ async def _generate_reply_locked(
                 include_poke=plugin_config.deepseek_poke_enabled,
                 include_stickers=plugin_config.deepseek_sticker_enabled,
                 include_search=plugin_config.deepseek_search_enabled,
+                include_scheduler=plugin_config.deepseek_scheduler_enabled,
             ),
             tool_runner=run_tool,
             max_tool_rounds=plugin_config.deepseek_tool_max_rounds,
@@ -549,10 +659,17 @@ async def generate_reply(
     session_key: str,
     text: str,
     images: Sequence[Mapping[str, Any]] | None = None,
+    *,
+    history_user_text: str | None = None,
 ) -> str:
     """携带上下文请求模型，成功后把本轮问答写入历史。"""
     async with store.lock(session_key):
-        return await _generate_reply_locked(session_key, text, images)
+        return await _generate_reply_locked(
+            session_key,
+            text,
+            images,
+            history_user_text=history_user_text,
+        )
 
 
 async def reply(
@@ -560,6 +677,9 @@ async def reply(
     text: str,
     send: Sender,
     images: Sequence[Mapping[str, Any]] | None = None,
+    *,
+    history_user_text: str | None = None,
+    allow_followup: bool = True,
 ) -> None:
     """生成回复并发送；出错时回复一条可读的错误提示。"""
     qid = uuid.uuid4().hex[:8]
@@ -577,7 +697,11 @@ async def reply(
     async with store.lock(session_key):
         try:
             answer = await _generate_reply_locked(
-                session_key, text, images, usage
+                session_key,
+                text,
+                images,
+                usage,
+                history_user_text=history_user_text,
             )
         except ImageError as exc:
             logger.warning(f"图片处理失败：{exc}")
@@ -650,10 +774,57 @@ async def reply(
             len(messages),
         )
 
+        if allow_followup:
+            _maybe_schedule_followup(session_key, answer)
+
         try:
             await compress_if_needed(session_key)
         except Exception:
             logger.exception("上下文压缩处理失败")
+
+
+async def proactive_reply(
+    session_key: str,
+    topic: str,
+    send: Sender,
+) -> None:
+    """到点后由模型主动生成一条消息，像真人一样开启话题。"""
+    prompt = (
+        "（现在是主动找用户聊天的时间。像真人一样自然地发一条消息开启话题，"
+        "可以问候、关心、分享或接着之前的话题；"
+        "直接输出你要发给用户的内容，不要提到这是定时任务，"
+        "不要解释，也不要说“有什么可以帮你”。"
+    )
+    if topic:
+        prompt += f"这次想聊：{topic}。"
+    prompt += "）"
+
+    await reply(
+        session_key,
+        prompt,
+        send,
+        history_user_text="（AI 主动找用户聊天）",
+    )
+
+
+async def followup_reply(
+    session_key: str,
+    send: Sender,
+) -> None:
+    """用户一段时间没回复时，由模型再补一句自然追问。"""
+    prompt = (
+        "（你刚才问了用户一个问题，但用户一段时间没有回复。"
+        "现在像真人一样再发一句，轻轻追问或关心；"
+        "不要提到定时任务，不要重复原问题，不要连续追问；"
+        "直接输出你要发给用户的内容。）"
+    )
+    await reply(
+        session_key,
+        prompt,
+        send,
+        history_user_text="（AI 追问未回复的用户）",
+        allow_followup=False,
+    )
 
 
 async def _is_message_complete(
@@ -726,6 +897,7 @@ async def process_private_poke(event: PokeNotifyEvent, send: Sender) -> None:
     logger.info(
         f"[chat] poke session={session_key} target={event.target_id}"
     )
+    _cancel_pending_followup(session_key)
     prompt = (
         POKE_BACK_PROMPT
         if plugin_config.deepseek_tools_enabled
@@ -777,6 +949,7 @@ async def process_private_message(event: PrivateMessageEvent, send: Sender) -> N
         f"images={len(images)} "
         f"aggregate={plugin_config.deepseek_aggregate_messages}"
     )
+    _cancel_pending_followup(session_key)
 
     if images and not plugin_config.deepseek_image_enabled:
         if not text:

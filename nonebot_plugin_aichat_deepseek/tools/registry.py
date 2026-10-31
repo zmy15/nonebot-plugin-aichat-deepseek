@@ -11,23 +11,28 @@ from nonebot import logger
 
 from ..history import ConversationStore
 from .base import (
+    SchedulerProvider,
     SearchCallable,
     Tool,
     ToolContext,
     error,
     parse_arguments,
 )
+from .cancel_scheduled_task import TOOL as CANCEL_SCHEDULED_TASK_TOOL
 from .clear_user_prompt import TOOL as CLEAR_USER_PROMPT_TOOL
 from .delete_memory import TOOL as DELETE_MEMORY_TOOL
 from .describe_sticker import TOOL as DESCRIBE_STICKER_TOOL
 from .get_user_prompt import TOOL as GET_USER_PROMPT_TOOL
+from .list_scheduled_tasks import TOOL as LIST_SCHEDULED_TASKS_TOOL
 from .poke_user import TOOL as POKE_USER_TOOL
 from .query_history import TOOL as QUERY_HISTORY_TOOL
+from .schedule_task import TOOL as SCHEDULE_TASK_TOOL
 from .save_memory import TOOL as SAVE_MEMORY_TOOL
 from .search_memory import TOOL as SEARCH_MEMORY_TOOL
 from .search_stickers import TOOL as SEARCH_STICKERS_TOOL
 from .send_sticker import TOOL as SEND_STICKER_TOOL
 from .set_user_prompt import TOOL as SET_USER_PROMPT_TOOL
+from .update_scheduled_task import TOOL as UPDATE_SCHEDULED_TASK_TOOL
 from .web_search import TOOL as WEB_SEARCH_TOOL
 
 ALL_TOOLS: tuple[Tool, ...] = (
@@ -40,6 +45,10 @@ ALL_TOOLS: tuple[Tool, ...] = (
     GET_USER_PROMPT_TOOL,
     CLEAR_USER_PROMPT_TOOL,
     POKE_USER_TOOL,
+    SCHEDULE_TASK_TOOL,
+    LIST_SCHEDULED_TASKS_TOOL,
+    CANCEL_SCHEDULED_TASK_TOOL,
+    UPDATE_SCHEDULED_TASK_TOOL,
     DESCRIBE_STICKER_TOOL,
     SEARCH_STICKERS_TOOL,
     SEND_STICKER_TOOL,
@@ -55,6 +64,7 @@ def build_tool_definitions(
     include_poke: bool = False,
     include_stickers: bool = False,
     include_search: bool = False,
+    include_scheduler: bool = False,
 ) -> list[dict[str, Any]]:
     groups = {"always"}
     if include_memory:
@@ -67,6 +77,8 @@ def build_tool_definitions(
         groups.add("stickers")
     if include_search:
         groups.add("search")
+    if include_scheduler:
+        groups.add("scheduler")
     return [
         tool.definition for tool in ALL_TOOLS if tool.group in groups
     ]
@@ -77,6 +89,7 @@ TOOL_DEFINITIONS = build_tool_definitions(
     include_poke=True,
     include_stickers=True,
     include_search=True,
+    include_scheduler=True,
 )
 
 
@@ -88,6 +101,7 @@ async def execute_tool(
     *,
     get_bot: Callable[[str], Any],
     search_web: SearchCallable | None = None,
+    get_scheduler: SchedulerProvider | None = None,
 ) -> str:
     """执行模型请求的工具，返回给模型的字符串结果。"""
     started = time.perf_counter()
@@ -124,6 +138,7 @@ async def execute_tool(
         store=store,
         get_bot=get_bot,
         search_web=search_web,
+        get_scheduler=get_scheduler,
     )
     try:
         result = tool.handler(args, context)

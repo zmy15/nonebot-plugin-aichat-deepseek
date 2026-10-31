@@ -1,6 +1,6 @@
 [project]
 name = "nonebot-plugin-aichat-deepseek"
-version = "0.16.0"
+version = "0.17.0"
 description = "基于 DeepSeek API 的 NoneBot2 私聊对话插件"
 readme = "README.md"
 license = { text = "MIT" }
@@ -9,6 +9,7 @@ requires-python = ">=3.10"
 dependencies = [
     "nonebot2>=2.5.0",
     "nonebot-adapter-onebot>=2.4.6",
+    "nonebot-plugin-apscheduler>=0.5.0",
     "httpx>=0.28.1",
 ]
 classifiers = [

@@ -45,6 +45,18 @@ class Config(BaseModel):
     deepseek_search_enabled: bool = True
     deepseek_search_default_count: int = Field(default=5, ge=1, le=50)
 
+    # 定时任务（nonebot-plugin-apscheduler）
+    deepseek_scheduler_enabled: bool = True
+    # 单个任务最长延迟，默认 7 天
+    deepseek_scheduler_max_delay_seconds: int = Field(
+        default=604800, ge=1
+    )
+    # 每个用户最多同时保留多少个定时任务
+    deepseek_scheduler_max_jobs: int = Field(default=5, ge=1)
+    # 提问后用户一段时间没回复，自动再补一句
+    deepseek_followup_enabled: bool = True
+    deepseek_followup_delay_seconds: int = Field(default=600, ge=1)
+
     # 表情包：自动收藏私聊收到的表情包，供模型按含义查询和发送
     deepseek_sticker_enabled: bool = True
     # 表情包图片保存目录。相对路径基于机器人启动目录

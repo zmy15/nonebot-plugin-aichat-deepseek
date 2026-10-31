@@ -20,6 +20,7 @@ ToolHandler: TypeAlias = Callable[
     [dict[str, Any], "ToolContext"], str | Awaitable[str]
 ]
 SearchCallable: TypeAlias = Callable[..., Awaitable[dict[str, Any]]]
+SchedulerProvider: TypeAlias = Callable[[], Any | None]
 
 
 def always_enabled() -> bool:
@@ -45,6 +46,7 @@ class ToolContext:
     store: ConversationStore
     get_bot: Callable[[str], Any]
     search_web: SearchCallable | None = None
+    get_scheduler: SchedulerProvider | None = None
 
 
 def make_definition(
