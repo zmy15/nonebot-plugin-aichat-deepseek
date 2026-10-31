@@ -19,6 +19,7 @@ MAX_CONTENT_CHARS = 600
 ToolHandler: TypeAlias = Callable[
     [dict[str, Any], "ToolContext"], str | Awaitable[str]
 ]
+SearchCallable: TypeAlias = Callable[..., Awaitable[dict[str, Any]]]
 
 
 def always_enabled() -> bool:
@@ -43,6 +44,7 @@ class ToolContext:
     session_key: str
     store: ConversationStore
     get_bot: Callable[[str], Any]
+    search_web: SearchCallable | None = None
 
 
 def make_definition(

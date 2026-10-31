@@ -10,7 +10,13 @@ from typing import Any, Callable
 from nonebot import logger
 
 from ..history import ConversationStore
-from .base import Tool, ToolContext, error, parse_arguments
+from .base import (
+    SearchCallable,
+    Tool,
+    ToolContext,
+    error,
+    parse_arguments,
+)
 from .clear_user_prompt import TOOL as CLEAR_USER_PROMPT_TOOL
 from .delete_memory import TOOL as DELETE_MEMORY_TOOL
 from .describe_sticker import TOOL as DESCRIBE_STICKER_TOOL
@@ -22,9 +28,11 @@ from .search_memory import TOOL as SEARCH_MEMORY_TOOL
 from .search_stickers import TOOL as SEARCH_STICKERS_TOOL
 from .send_sticker import TOOL as SEND_STICKER_TOOL
 from .set_user_prompt import TOOL as SET_USER_PROMPT_TOOL
+from .web_search import TOOL as WEB_SEARCH_TOOL
 
 ALL_TOOLS: tuple[Tool, ...] = (
     QUERY_HISTORY_TOOL,
+    WEB_SEARCH_TOOL,
     SAVE_MEMORY_TOOL,
     SEARCH_MEMORY_TOOL,
     DELETE_MEMORY_TOOL,
@@ -46,6 +54,7 @@ def build_tool_definitions(
     include_custom_prompt: bool = False,
     include_poke: bool = False,
     include_stickers: bool = False,
+    include_search: bool = False,
 ) -> list[dict[str, Any]]:
     groups = {"always"}
     if include_memory:
@@ -56,6 +65,8 @@ def build_tool_definitions(
         groups.add("poke")
     if include_stickers:
         groups.add("stickers")
+    if include_search:
+        groups.add("search")
     return [
         tool.definition for tool in ALL_TOOLS if tool.group in groups
     ]
@@ -65,6 +76,7 @@ TOOL_DEFINITIONS = build_tool_definitions(
     include_custom_prompt=True,
     include_poke=True,
     include_stickers=True,
+    include_search=True,
 )
 
 
@@ -75,6 +87,7 @@ async def execute_tool(
     store: ConversationStore,
     *,
     get_bot: Callable[[str], Any],
+    search_web: SearchCallable | None = None,
 ) -> str:
     """执行模型请求的工具，返回给模型的字符串结果。"""
     started = time.perf_counter()
@@ -110,6 +123,7 @@ async def execute_tool(
         session_key=session_key,
         store=store,
         get_bot=get_bot,
+        search_web=search_web,
     )
     try:
         result = tool.handler(args, context)

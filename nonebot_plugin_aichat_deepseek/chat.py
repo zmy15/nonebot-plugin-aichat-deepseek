@@ -252,6 +252,16 @@ def _build_system_prompt(
 
     if (
         plugin_config.deepseek_tools_enabled
+        and plugin_config.deepseek_search_enabled
+    ):
+        rules += (
+            "\n当用户询问实时信息、新闻、价格、天气、最近发生的事件，"
+            "或你不确定、需要最新资料时，调用 web_search 搜索网页；"
+            "不要凭记忆编造实时信息。"
+        )
+
+    if (
+        plugin_config.deepseek_tools_enabled
         and plugin_config.deepseek_custom_prompt_enabled
     ):
         rules += (
@@ -498,7 +508,13 @@ async def _generate_reply_locked(
     if plugin_config.deepseek_tools_enabled:
 
         async def run_tool(name: str, arguments: str) -> str:
-            return await execute_tool(name, arguments, session_key, store)
+            return await execute_tool(
+                name,
+                arguments,
+                session_key,
+                store,
+                search_web=getattr(client, "search", None),
+            )
 
         answer = await client.chat_with_tools(
             messages,
@@ -509,6 +525,7 @@ async def _generate_reply_locked(
                 ),
                 include_poke=plugin_config.deepseek_poke_enabled,
                 include_stickers=plugin_config.deepseek_sticker_enabled,
+                include_search=plugin_config.deepseek_search_enabled,
             ),
             tool_runner=run_tool,
             max_tool_rounds=plugin_config.deepseek_tool_max_rounds,

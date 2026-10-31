@@ -139,6 +139,104 @@ async def test_empty_choices(ds) -> None:
         await client.chat(MESSAGES)
 
 
+async def test_search_success_and_payload(ds) -> None:
+    seen: dict[str, httpx.Request] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["request"] = request
+        return httpx.Response(
+            200,
+            json={
+                "results": [
+                    {
+                        "title": "DeepSeek",
+                        "url": "https://example.com",
+                        "snippet": "snippet",
+                        "summary": "summary",
+                        "content": "content",
+                        "site_name": "Example",
+                        "date": "2026-01-01T00:00:00+00:00",
+                        "authority": 3,
+                        "rerank_score": 2.4,
+                    }
+                ]
+            },
+        )
+
+    client = make_client(ds.DeepSeekClient, handler)
+    data = await client.search(
+        "DeepSeek",
+        count=5,
+        need_content=True,
+        ori_question="DeepSeek 最近有什么新闻",
+    )
+
+    request = seen["request"]
+    assert request.method == "POST"
+    assert str(request.url) == "https://api.deepseek.com/v1/tools/search"
+    assert request.headers["Authorization"] == "Bearer sk-test"
+    assert request.headers["Content-Type"] == "application/json"
+
+    payload = json.loads(request.content)
+    assert payload == {
+        "query": "DeepSeek",
+        "count": 5,
+        "need_content": True,
+        "ori_question": "DeepSeek 最近有什么新闻",
+    }
+    assert data["results"][0]["title"] == "DeepSeek"
+
+
+async def test_search_base_url_with_v1(ds) -> None:
+    seen: dict[str, httpx.Request] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["request"] = request
+        return httpx.Response(200, json={"results": []})
+
+    client = make_client(
+        ds.DeepSeekClient,
+        handler,
+        api_base="https://api.deepseek.com/v1/",
+    )
+    assert await client.search("test") == {"results": []}
+    assert str(seen["request"].url) == "https://api.deepseek.com/v1/tools/search"
+    assert "ori_question" not in json.loads(seen["request"].content)
+
+
+async def test_search_http_error(ds) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            401,
+            json={"error": {"message": "Authentication Fails"}},
+        )
+
+    client = make_client(ds.DeepSeekClient, handler)
+    with pytest.raises(ds.DeepSeekError) as exc_info:
+        await client.search("test")
+
+    assert exc_info.value.status_code == 401
+    assert "Authentication Fails" in str(exc_info.value)
+
+
+async def test_search_invalid_response(ds) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"results": "not-a-list"})
+
+    client = make_client(ds.DeepSeekClient, handler)
+    with pytest.raises(ds.DeepSeekError, match="无法解析"):
+        await client.search("test")
+
+
+async def test_search_without_api_key(ds) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("不应发起请求")
+
+    client = make_client(ds.DeepSeekClient, handler, api_key=None)
+    with pytest.raises(ds.DeepSeekError, match="未配置"):
+        await client.search("test")
+
+
 async def test_empty_content(ds) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"choices": [{"message": {"content": " "}}]})

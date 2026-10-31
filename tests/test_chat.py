@@ -425,6 +425,8 @@ def test_system_prompt_contains_output_rules() -> None:
     assert "句末可以不带标点" in prompt
     assert "优先分成多条" in prompt
     assert "query_chat_history" in prompt
+    assert "web_search" in prompt
+    assert "来源链接" not in prompt
     assert "save_user_memory" in prompt
     assert "UTC+8" in prompt
     assert "主动戳一戳" in prompt
@@ -581,6 +583,65 @@ async def test_reply_tool_can_save_memory(
     assert "【用户长期记忆】" in messages[0]["content"]
     assert "喜欢猫" in messages[0]["content"]
     assert sent == ["记住了"]
+
+
+async def test_reply_tool_can_web_search(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from nonebot_plugin_aichat_deepseek import chat as chat_module
+
+    class SearchClient:
+        configured = True
+
+        def __init__(self) -> None:
+            self.tool_result = ""
+            self.tool_names: list[str] = []
+
+        async def search(self, query, **kwargs) -> dict:
+            assert query == "最近有什么新闻"
+            return {
+                "results": [
+                    {
+                        "title": "今日新闻",
+                        "url": "https://example.com/news",
+                        "snippet": "新闻摘要",
+                        "summary": "新闻长摘要",
+                    }
+                ]
+            }
+
+        async def chat_with_tools(
+            self,
+            messages,
+            *,
+            tools,
+            tool_runner,
+            max_tool_rounds,
+            **kwargs,
+        ) -> str:
+            self.tool_names = [
+                tool["function"]["name"] for tool in tools
+            ]
+            self.tool_result = await tool_runner(
+                "web_search", '{"query":"最近有什么新闻"}'
+            )
+            return "查到一条新闻"
+
+    fake = SearchClient()
+    monkeypatch.setattr(chat_module, "client", fake)
+    chat_module.store.clear("10:10")
+
+    sent: list[str] = []
+
+    async def send(message: str) -> None:
+        sent.append(message)
+
+    await chat_module.reply("10:10", "最近有什么新闻", send)
+
+    assert "web_search" in fake.tool_names
+    assert "今日新闻" in fake.tool_result
+    assert "https://example.com/news" in fake.tool_result
+    assert sent == ["查到一条新闻"]
 
 
 async def test_reply_with_image_uploads_and_sends(

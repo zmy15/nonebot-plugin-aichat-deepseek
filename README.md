@@ -17,6 +17,7 @@
 - 连续消息聚合：用户分多次发送的一句话会合并；AI 判断不完整时先不回复，等提问完整
 - 回复抖动：首条回复前有随机停顿，多条回复之间也有随机间隔
 - 支持私聊图片理解：图片经 Files API 上传后以 `file_id` 交给 `deepseek-flash` 分析
+- 联网搜索：模型可调用 `web_search` 查询实时信息、新闻等网页内容
 - 表情包收藏：自动把私聊收到的表情包存入本地表情库，记录含义和标签
 - 模型可调用工具按含义查询表情包，并通过 OneBot 图片消息发送
 - 未压缩消息超过 30 轮时，自动把最早 20 条消息压缩成摘要，放到 system 指令之后
@@ -60,6 +61,8 @@ DEEPSEEK_CUSTOM_PROMPT_MAX_CHARS=2000
 DEEPSEEK_IMAGE_ENABLED=true
 DEEPSEEK_IMAGE_MAX_COUNT=4
 DEEPSEEK_IMAGE_EXPIRE_SECONDS=86400
+DEEPSEEK_SEARCH_ENABLED=true
+DEEPSEEK_SEARCH_DEFAULT_COUNT=5
 DEEPSEEK_STICKER_ENABLED=true
 DEEPSEEK_STICKER_DIR=data/nonebot_plugin_aichat_deepseek/stickers
 DEEPSEEK_STICKER_MAX_COUNT=4
@@ -97,6 +100,8 @@ DEEPSEEK_REPLY_INTERVAL=1.0
 | `DEEPSEEK_IMAGE_MAX_COUNT` | `int` | `4` | 单条消息最多处理几张图片 |
 | `DEEPSEEK_IMAGE_TIMEOUT` | `float` | `60.0` | 下载图片超时（秒） |
 | `DEEPSEEK_IMAGE_EXPIRE_SECONDS` | `int` | `86400` | 上传文件有效期（秒），`0` 表示永久有效 |
+| `DEEPSEEK_SEARCH_ENABLED` | `bool` | `True` | 是否启用 `web_search` 联网搜索工具 |
+| `DEEPSEEK_SEARCH_DEFAULT_COUNT` | `int` | `5` | 搜索工具默认返回条数，1–50 |
 | `DEEPSEEK_STICKER_ENABLED` | `bool` | `True` | 是否自动收藏表情包并启用表情包工具 |
 | `DEEPSEEK_STICKER_DIR` | `str` | `data/nonebot_plugin_aichat_deepseek/stickers` | 表情包图片保存目录，相对路径基于机器人启动目录 |
 | `DEEPSEEK_STICKER_MAX_COUNT` | `int` | `4` | 单条消息最多自动收藏几个表情包 |
@@ -217,6 +222,25 @@ DEEPSEEK_REPLY_INTERVAL=1.0
 - 上传文件默认 24 小时后过期，可通过 `DEEPSEEK_IMAGE_EXPIRE_SECONDS=0` 改为永久有效；
 - 格式和限制参考 [图像理解](https://api-docs.deepseek.com/zh-cn/guides/vision)。
 
+## 联网搜索
+
+启用 `DEEPSEEK_SEARCH_ENABLED` 后，模型会获得 `web_search` 工具，通过 DeepSeek 的 `POST /v1/tools/search` 接口搜索网页。该接口与对话接口使用同一个 `DEEPSEEK_API_KEY`。
+
+- 适合查询实时信息、新闻、价格、天气、最近发生的事件等；
+- 支持 `site:`、`-site:`、`-关键词`、`"精确短语"`、`lang:`、`after:`、`before:` 等搜索语法；
+- 默认只返回 `snippet` / `summary`，需要网页正文时把 `need_content` 设为 `true`；
+- 工具返回 `title`、`url`、`snippet`、`summary`、`site_name`、`date`、`authority`、`rerank_score` 等字段，回答时不要求附来源链接；
+- 默认返回 `DEEPSEEK_SEARCH_DEFAULT_COUNT` 条，单次最多 50 条。
+
+注意：
+
+- Search 按成功请求次数计费（当前文档价格：5 元 / 1000 次成功请求），`count` 不影响单次价格；
+- 账号级 QPS 限制为 100，超过会返回 429；
+- 401/402/429/5xx 等错误会转换成中文提示返回给模型，不会中断普通聊天；
+- 只有成功返回且 `results` 非空时才会计费。
+
+参考：[网页搜索 API](https://api-docs.deepseek.com/zh-cn/api/search)、[网页搜索与抓取指南](https://api-docs.deepseek.com/zh-cn/guides/search)。
+
 ## 表情包
 
 启用 `DEEPSEEK_STICKER_ENABLED` 后，私聊收到表情包时会自动收藏：
@@ -298,11 +322,12 @@ DEEPSEEK_REPLY_INTERVAL=1.0
 
 ## 工具调用
 
-启用 `DEEPSEEK_TOOLS_ENABLED` 后，模型会获得以下工具（记忆相关工具还要求 `DEEPSEEK_MEMORY_ENABLED=true`，自定义提示词工具要求 `DEEPSEEK_CUSTOM_PROMPT_ENABLED=true`，表情包工具要求 `DEEPSEEK_STICKER_ENABLED=true`）：
+启用 `DEEPSEEK_TOOLS_ENABLED` 后，模型会获得以下工具（记忆相关工具还要求 `DEEPSEEK_MEMORY_ENABLED=true`，自定义提示词工具要求 `DEEPSEEK_CUSTOM_PROMPT_ENABLED=true`，表情包工具要求 `DEEPSEEK_STICKER_ENABLED=true`，联网搜索工具要求 `DEEPSEEK_SEARCH_ENABLED=true`）：
 
 | 工具 | 说明 |
 | --- | --- |
 | `query_chat_history` | 查询当前私聊用户过去的聊天记录 |
+| `web_search` | 联网搜索实时网页信息 |
 | `save_user_memory` | 保存用户长期信息、偏好等 |
 | `search_user_memory` | 搜索已保存的长期记忆 |
 | `delete_user_memory` | 删除某条长期记忆 |
@@ -338,6 +363,17 @@ DEEPSEEK_REPLY_INTERVAL=1.0
 - 单次回复最多进行 `DEEPSEEK_TOOL_MAX_ROUNDS` 轮工具调用，超过后强制模型输出最终回复。
 - 是否调用工具由模型根据用户问题自行决定。
 - 工具调用格式参考 [DeepSeek Tool Calls 文档](https://api-docs.deepseek.com/zh-cn/guides/tool_calls)。
+
+### `web_search`
+
+| 参数 | 类型 | 说明 |
+| --- | --- | --- |
+| `query` | `string` | 必填，搜索词，1–128 个字符，支持 `site:`、引号、`lang:`、`after:` 等语法 |
+| `count` | `integer` | 可选，返回 1–50 条，默认 `DEEPSEEK_SEARCH_DEFAULT_COUNT` |
+| `need_content` | `boolean` | 可选，是否返回网页正文，默认 `false` |
+| `ori_question` | `string` | 可选，触发搜索的用户原始问题，1–128 个字符 |
+
+返回结果会裁剪 `snippet`、`summary` 和 `content` 的长度，避免占用过多上下文。搜索失败时返回中文错误，例如 API Key 无效、余额不足、请求过于频繁或服务暂时不可用。
 
 ### `save_user_memory`
 
@@ -446,6 +482,8 @@ pytest
 - [DeepSeek 图像理解](https://api-docs.deepseek.com/zh-cn/guides/vision)
 - [OneBot 11 消息段格式](https://github.com/botuniverse/onebot-11/blob/master/message/segment.md)
 - [OneBot 11 API](https://github.com/botuniverse/onebot-11/blob/master/api/README.md)
+- [DeepSeek 网页搜索 API](https://api-docs.deepseek.com/zh-cn/api/search)
+- [DeepSeek 网页搜索与抓取指南](https://api-docs.deepseek.com/zh-cn/guides/search)
 
 ## 许可协议
 

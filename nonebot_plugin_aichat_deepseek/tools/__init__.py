@@ -11,7 +11,7 @@ from typing import Any
 from nonebot import get_bot
 
 from ..history import ConversationStore
-from .base import Tool, ToolContext, make_definition
+from .base import SearchCallable, Tool, ToolContext, make_definition
 from .clear_user_prompt import NAME as TOOL_CLEAR_USER_PROMPT
 from .delete_memory import NAME as TOOL_DELETE_MEMORY
 from .describe_sticker import NAME as TOOL_DESCRIBE_STICKER
@@ -29,6 +29,7 @@ from .search_memory import NAME as TOOL_SEARCH_MEMORY
 from .search_stickers import NAME as TOOL_SEARCH_STICKERS
 from .send_sticker import NAME as TOOL_SEND_STICKER
 from .set_user_prompt import NAME as TOOL_SET_USER_PROMPT
+from .web_search import NAME as TOOL_WEB_SEARCH
 
 
 async def execute_tool(
@@ -36,14 +37,17 @@ async def execute_tool(
     arguments: str | dict[str, Any],
     session_key: str,
     store: ConversationStore,
+    *,
+    search_web: SearchCallable | None = None,
 ) -> str:
-    """执行模型请求的工具，保留原有入口并注入当前 bot 获取函数。"""
+    """执行模型请求的工具，保留原有入口并注入外部依赖。"""
     return await _execute_tool(
         name,
         arguments,
         session_key,
         store,
         get_bot=get_bot,
+        search_web=search_web,
     )
 
 
@@ -57,6 +61,7 @@ __all__ = [
     "build_tool_definitions",
     "execute_tool",
     "TOOL_QUERY_HISTORY",
+    "TOOL_WEB_SEARCH",
     "TOOL_SAVE_MEMORY",
     "TOOL_SEARCH_MEMORY",
     "TOOL_DELETE_MEMORY",

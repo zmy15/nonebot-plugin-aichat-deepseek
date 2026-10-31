@@ -41,6 +41,10 @@ class Config(BaseModel):
     deepseek_custom_prompt_enabled: bool = True
     deepseek_custom_prompt_max_chars: int = Field(default=2000, ge=1)
 
+    # 联网搜索（DeepSeek Search API）
+    deepseek_search_enabled: bool = True
+    deepseek_search_default_count: int = Field(default=5, ge=1, le=50)
+
     # 表情包：自动收藏私聊收到的表情包，供模型按含义查询和发送
     deepseek_sticker_enabled: bool = True
     # 表情包图片保存目录。相对路径基于机器人启动目录

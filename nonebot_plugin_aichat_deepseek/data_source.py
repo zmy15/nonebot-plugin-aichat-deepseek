@@ -263,6 +263,103 @@ class DeepSeekClient:
         )
         return self._extract_content(data)
 
+    def _search_url(self) -> str:
+        base = self._api_base.rstrip("/")
+        if base.endswith("/v1"):
+            return f"{base}/tools/search"
+        return f"{base}/v1/tools/search"
+
+    async def search(
+        self,
+        query: str,
+        *,
+        count: int = 5,
+        need_content: bool = False,
+        ori_question: str | None = None,
+        session_key: str = "",
+    ) -> dict[str, Any]:
+        """调用 DeepSeek 网页搜索接口，返回原始 JSON 结果。"""
+        started = time.perf_counter()
+        label = f"session={session_key or '-'} phase=web_search"
+        logger.info(
+            f"[deepseek-api] start {label} api=search count={count} "
+            f"need_content={str(need_content).lower()}"
+        )
+
+        if not self._api_key:
+            logger.warning(
+                f"[deepseek-api] error {label} api=search status=None "
+                f"duration_ms={_elapsed_ms(started)} "
+                "message=未配置 DEEPSEEK_API_KEY"
+            )
+            raise DeepSeekError("未配置 DEEPSEEK_API_KEY")
+
+        payload: dict[str, Any] = {
+            "query": query,
+            "count": count,
+            "need_content": need_content,
+        }
+        if ori_question:
+            payload["ori_question"] = ori_question
+
+        headers = {
+            "Authorization": f"Bearer {self._api_key}",
+            "Content-Type": "application/json",
+        }
+
+        try:
+            async with httpx.AsyncClient(
+                timeout=self._timeout,
+                transport=self._transport,
+            ) as client:
+                response = await client.post(
+                    self._search_url(),
+                    headers=headers,
+                    json=payload,
+                )
+        except httpx.TimeoutException as exc:
+            logger.warning(
+                f"[deepseek-api] error {label} api=search status=None "
+                f"duration_ms={_elapsed_ms(started)} message=timeout"
+            )
+            raise DeepSeekError("请求网页搜索超时") from exc
+        except httpx.HTTPError as exc:
+            logger.warning(
+                f"[deepseek-api] error {label} api=search status=None "
+                f"duration_ms={_elapsed_ms(started)} "
+                f"message={exc.__class__.__name__}"
+            )
+            raise DeepSeekError(
+                f"请求网页搜索失败：{exc.__class__.__name__}"
+            ) from exc
+
+        data = self._parse_json(response)
+        if response.status_code >= 400:
+            detail = self._error_detail(response, data)
+            logger.warning(
+                f"[deepseek-api] error {label} api=search "
+                f"status={response.status_code} "
+                f"duration_ms={_elapsed_ms(started)} message={detail}"
+            )
+            raise DeepSeekError(detail, status_code=response.status_code)
+
+        if not isinstance(data, dict):
+            logger.warning(
+                f"[deepseek-api] error {label} api=search status=200 "
+                f"duration_ms={_elapsed_ms(started)} "
+                "message=无法解析响应"
+            )
+            raise DeepSeekError("网页搜索返回了无法解析的响应")
+        results = data.get("results")
+        if not isinstance(results, list):
+            raise DeepSeekError("网页搜索返回了无法解析的结果")
+
+        logger.info(
+            f"[deepseek-api] ok {label} api=search status=200 "
+            f"duration_ms={_elapsed_ms(started)} results={len(results)}"
+        )
+        return data
+
     async def upload_image(
         self,
         image_data: bytes,

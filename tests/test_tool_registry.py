@@ -8,6 +8,7 @@ def test_each_tool_is_self_contained(tools_mod) -> None:
 
     assert names == [
         "query_chat_history",
+        "web_search",
         "save_user_memory",
         "search_user_memory",
         "delete_user_memory",
