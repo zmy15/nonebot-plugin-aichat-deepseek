@@ -10,6 +10,7 @@ if str(PLUGIN_ROOT) not in sys.path:
 
 os.environ.setdefault("ENVIRONMENT", "test")
 os.environ.setdefault("DEEPSEEK_API_KEY", "sk-test")
+os.environ.setdefault("DEEPSEEK_DB_PATH", ":memory:")
 
 
 @pytest.fixture

@@ -17,13 +17,17 @@ from nonebot.rule import Rule
 
 from .config import plugin_config
 from .data_source import ChatMessage, DeepSeekClient, DeepSeekError
-from .formatting import split_reply
+from .formatting import split_reply, strip_markdown
 from .history import ConversationStore
 
 Sender = Callable[[str], Awaitable[None]]
 
 MISSING_API_KEY_TIP = "还没有配置 DEEPSEEK_API_KEY，请先在 .env 中填写后再试。"
 EMPTY_REPLY_TIP = "……"
+SUMMARY_SYSTEM_PROMPT = (
+    "你是一个对话摘要助手。请把用户与 AI 的对话压缩成一段简洁的中文摘要，"
+    "保留关键事实、用户偏好、约定和未完成事项；不要编造，不要使用 Markdown。"
+)
 
 client = DeepSeekClient(
     api_key=plugin_config.deepseek_api_key,
@@ -35,7 +39,12 @@ client = DeepSeekClient(
     thinking=plugin_config.deepseek_thinking,
 )
 
-store = ConversationStore(plugin_config.deepseek_history_turns)
+store = ConversationStore(
+    db_path=plugin_config.deepseek_db_path,
+    max_turns=plugin_config.deepseek_history_turns,
+    trigger_turns=plugin_config.deepseek_compression_trigger_turns,
+    batch_messages=plugin_config.deepseek_compression_batch_messages,
+)
 
 
 async def _is_private_message(event: Event) -> bool:
@@ -82,7 +91,7 @@ def _format_error(exc: DeepSeekError) -> str:
     return f"DeepSeek 请求失败：{detail}"
 
 
-def _build_system_prompt() -> str:
+def _build_system_prompt(summary: str = "") -> str:
     """在用户配置的人设之后追加纯文本、分隔符等输出约束。"""
     persona = plugin_config.deepseek_system_prompt.strip()
     delimiter = plugin_config.deepseek_split_delimiter.strip() or "|||"
@@ -94,14 +103,77 @@ def _build_system_prompt() -> str:
         "每条消息简短自然，像真人聊天。\n"
         "3. 不要在回复中解释或提到分隔符。"
     )
-    return f"{persona}\n\n{rules}" if persona else rules
+    prompt = f"{persona}\n\n{rules}" if persona else rules
+    if summary:
+        prompt = f"{prompt}\n\n【历史对话摘要】\n{summary}"
+    return prompt
 
 
 def _build_request_messages(session_key: str, text: str) -> list[ChatMessage]:
     messages = store.build_messages(session_key)
-    messages.insert(0, {"role": "system", "content": _build_system_prompt()})
+    summary = store.get_summary(session_key)
+    messages.insert(
+        0,
+        {"role": "system", "content": _build_system_prompt(summary)},
+    )
     messages.append({"role": "user", "content": text})
     return messages
+
+
+def _build_summary_messages(
+    previous_summary: str, batch: list[ChatMessage]
+) -> list[ChatMessage]:
+    lines: list[str] = []
+    if previous_summary:
+        lines.extend(["【已有摘要】", previous_summary, ""])
+
+    lines.append("【待压缩对话】")
+    for message in batch:
+        speaker = "用户" if message["role"] == "user" else "AI"
+        lines.append(f"{speaker}：{message['content']}")
+
+    lines.extend(["", "请输出更新后的摘要正文，300 字以内，不要输出其它内容。"])
+    return [
+        {"role": "system", "content": SUMMARY_SYSTEM_PROMPT},
+        {"role": "user", "content": "\n".join(lines)},
+    ]
+
+
+async def compress_if_needed(session_key: str) -> None:
+    """未压缩消息超过阈值时，把最早一批消息压缩进滚动摘要。"""
+    if not store.needs_compression(session_key):
+        return
+
+    batch = store.get_compression_batch(session_key)
+    if not batch:
+        return
+
+    previous_summary = store.get_summary(session_key)
+    try:
+        summary = await client.chat(
+            _build_summary_messages(previous_summary, batch)
+        )
+    except DeepSeekError as exc:
+        logger.warning(
+            f"上下文压缩失败（status={exc.status_code}）：{exc.message}"
+        )
+        return
+    except Exception:
+        logger.exception("上下文压缩出现未预期异常")
+        return
+
+    summary = strip_markdown(summary).strip()
+    delimiter = plugin_config.deepseek_split_delimiter.strip()
+    if delimiter:
+        summary = summary.replace(delimiter, " ").strip()
+    if not summary:
+        logger.warning("上下文压缩返回空摘要，本次跳过")
+        return
+    if len(summary) > 1000:
+        summary = summary[:1000]
+
+    store.apply_compression(session_key, len(batch), summary)
+    logger.info(f"已压缩 {len(batch)} 条历史消息：{session_key}")
 
 
 async def _generate_reply_locked(session_key: str, text: str) -> str:
@@ -152,6 +224,11 @@ async def reply(session_key: str, text: str, send: Sender) -> None:
                 if delay > 0:
                     await asyncio.sleep(delay)
             await send(message)
+
+        try:
+            await compress_if_needed(session_key)
+        except Exception:
+            logger.exception("上下文压缩处理失败")
 
 
 async def process_private_message(event: PrivateMessageEvent, send: Sender) -> None:

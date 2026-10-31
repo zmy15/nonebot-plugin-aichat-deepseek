@@ -17,6 +17,7 @@ __plugin_meta__ = PluginMetadata(
     usage=(
         "私聊机器人直接发送消息即可开始对话，支持多轮上下文。\n"
         "回复会自动去除 Markdown 并按真人节奏分条发送。\n"
+        "对话历史保存到本地数据库，默认超过 30 轮自动压缩摘要。\n"
         "发送 /ping 可检查插件是否在线。"
     ),
     type="application",

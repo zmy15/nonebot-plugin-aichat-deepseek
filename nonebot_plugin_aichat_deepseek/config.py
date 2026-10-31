@@ -23,6 +23,9 @@ class Config(BaseModel):
     deepseek_model: str = "deepseek-flash"
     deepseek_timeout: float = Field(default=60.0, gt=0)
 
+    # 数据存储（SQLite）。相对路径基于机器人启动目录
+    deepseek_db_path: str = "data/nonebot_plugin_aichat_deepseek/chat.db"
+
     # 生成参数
     deepseek_system_prompt: str = (
         "你是一个乐于助人的 AI 助手，请使用简体中文回答用户的问题。"
@@ -33,8 +36,14 @@ class Config(BaseModel):
     # True / False 分别显式开启 / 关闭思考模式。
     deepseek_thinking: bool | None = None
 
-    # 对话上下文：保留最近多少轮（一问一答为一轮），0 表示不保留上下文
-    deepseek_history_turns: int = Field(default=5, ge=0)
+    # 对话上下文：每次最多加载最近多少轮（一问一答为一轮）；
+    # 0 表示不加载上下文，但对话仍会写入数据库
+    deepseek_history_turns: int = Field(default=30, ge=0)
+    # 未压缩消息超过 trigger_turns 轮时，把最早的一批消息压缩成摘要；
+    # trigger_turns=0 表示关闭自动压缩。
+    deepseek_compression_trigger_turns: int = Field(default=30, ge=0)
+    # 每次压缩的消息条数（用户消息和 AI 回复各算一条）
+    deepseek_compression_batch_messages: int = Field(default=20, ge=1)
 
     # 输出格式：模型用该分隔符把回复拆成多条消息发送
     deepseek_split_delimiter: str = Field(default="|||", min_length=1)
