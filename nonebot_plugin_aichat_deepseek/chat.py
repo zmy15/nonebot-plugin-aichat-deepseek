@@ -12,9 +12,9 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import datetime
 from typing import Any
 
-from nonebot import get_driver, logger, on_message
+from nonebot import get_driver, logger, on_message, on_notice
 from nonebot.adapters import Event
-from nonebot.adapters.onebot.v11 import PrivateMessageEvent
+from nonebot.adapters.onebot.v11 import Bot, PokeNotifyEvent, PrivateMessageEvent
 from nonebot.matcher import Matcher
 from nonebot.rule import Rule
 
@@ -35,6 +35,7 @@ Sender = Callable[[str], Awaitable[None]]
 MISSING_API_KEY_TIP = "还没有配置 DEEPSEEK_API_KEY，请先在 .env 中填写后再试。"
 IMAGE_DISABLED_TIP = "图片理解功能还没有开启。"
 EMPTY_REPLY_TIP = "……"
+POKE_PROMPT = "（对方戳了你一下，请用一句简短自然的话回应）"
 COMPLETENESS_SYSTEM_PROMPT = (
     "你是一个消息完整性判断器。用户可能把同一句话拆成多条发送。\n"
     "下面会给出最近对话和当前拼接后的用户消息。"
@@ -76,7 +77,21 @@ async def _is_private_message(event: Event) -> bool:
 private_chat = on_message(rule=Rule(_is_private_message), priority=100, block=True)
 
 
-def _session_key(event: PrivateMessageEvent) -> str:
+def _is_private_poke(event: Event) -> bool:
+    """只响应私聊里戳机器人本人的事件。"""
+    return (
+        plugin_config.deepseek_poke_enabled
+        and isinstance(event, PokeNotifyEvent)
+        and not event.group_id
+        and event.target_id == event.self_id
+        and event.user_id != event.self_id
+    )
+
+
+private_poke = on_notice(rule=Rule(_is_private_poke), priority=5, block=True)
+
+
+def _session_key(event: PrivateMessageEvent | PokeNotifyEvent) -> str:
     """同一机器人下按用户隔离上下文。"""
     return f"{event.self_id}:{event.user_id}"
 
@@ -235,6 +250,15 @@ def _build_system_prompt(
             "调用 set_user_system_prompt 保存；"
             "询问当前设定时调用 get_user_system_prompt；"
             "要求恢复默认时调用 clear_user_system_prompt。"
+        )
+
+    if (
+        plugin_config.deepseek_tools_enabled
+        and plugin_config.deepseek_poke_enabled
+    ):
+        rules += (
+            "\n用户明确要求你戳一戳、提醒他或互动时，调用 poke_user；"
+            "不要频繁、无故戳用户。"
         )
 
     prompt = f"{persona}\n\n{rules}" if persona else rules
@@ -425,6 +449,7 @@ async def _generate_reply_locked(
                 include_custom_prompt=(
                     plugin_config.deepseek_custom_prompt_enabled
                 ),
+                include_poke=plugin_config.deepseek_poke_enabled,
             ),
             tool_runner=run_tool,
             max_tool_rounds=plugin_config.deepseek_tool_max_rounds,
@@ -620,6 +645,14 @@ message_aggregator = MessageAggregator(
 )
 
 
+async def process_private_poke(event: PokeNotifyEvent, send: Sender) -> None:
+    session_key = _session_key(event)
+    logger.info(
+        f"[chat] poke session={session_key} target={event.target_id}"
+    )
+    await reply(session_key, POKE_PROMPT, send)
+
+
 async def process_private_message(event: PrivateMessageEvent, send: Sender) -> None:
     text = event.get_plaintext().strip()
     images = [
@@ -664,3 +697,15 @@ async def handle_private_chat(event: PrivateMessageEvent, matcher: Matcher) -> N
         await matcher.send(message)
 
     await process_private_message(event, send)
+
+
+@private_poke.handle()
+async def handle_private_poke(bot: Bot, event: PokeNotifyEvent) -> None:
+    async def send(message: str) -> None:
+        await bot.call_api(
+            "send_private_msg",
+            user_id=event.user_id,
+            message=message,
+        )
+
+    await process_private_poke(event, send)

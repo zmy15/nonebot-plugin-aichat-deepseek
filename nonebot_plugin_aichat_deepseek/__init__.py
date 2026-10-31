@@ -23,6 +23,7 @@ __plugin_meta__ = PluginMetadata(
         "私聊可以直接发送图片，由 deepseek-flash 进行图像理解。\n"
         "连续发送的多条消息会先聚合，判断完整后再回复。\n"
         "也可以用自然语言设置只属于自己的 system 提示词或人设。\n"
+        "模型可以戳一戳用户，用户戳机器人时也会得到回应。\n"
         "发送 /ping 可检查插件是否在线。"
     ),
     type="application",

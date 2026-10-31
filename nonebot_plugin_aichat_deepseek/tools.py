@@ -11,13 +11,14 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 import re
 import time
 from datetime import datetime
 from typing import Any
 
-from nonebot import logger
+from nonebot import get_bot, logger
 
 from .config import plugin_config
 from .formatting import strip_markdown
@@ -30,6 +31,7 @@ TOOL_DELETE_MEMORY = "delete_user_memory"
 TOOL_SET_USER_PROMPT = "set_user_system_prompt"
 TOOL_GET_USER_PROMPT = "get_user_system_prompt"
 TOOL_CLEAR_USER_PROMPT = "clear_user_system_prompt"
+TOOL_POKE_USER = "poke_user"
 
 MEMORY_CATEGORIES = (
     "profile",
@@ -233,21 +235,43 @@ CUSTOM_PROMPT_TOOL_DEFINITIONS = [
     CLEAR_USER_PROMPT_TOOL,
 ]
 
+POKE_USER_TOOL: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": TOOL_POKE_USER,
+        "description": (
+            "戳一戳当前私聊用户。用户明确要求你戳他、提醒他或互动时调用；"
+            "不要频繁、无故调用。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+    },
+}
+
 
 def build_tool_definitions(
     *,
     include_memory: bool = True,
     include_custom_prompt: bool = False,
+    include_poke: bool = False,
 ) -> list[dict[str, Any]]:
     tools = [QUERY_HISTORY_TOOL]
     if include_memory:
         tools.extend(MEMORY_TOOL_DEFINITIONS)
     if include_custom_prompt:
         tools.extend(CUSTOM_PROMPT_TOOL_DEFINITIONS)
+    if include_poke:
+        tools.append(POKE_USER_TOOL)
     return tools
 
 
-TOOL_DEFINITIONS = build_tool_definitions(include_custom_prompt=True)
+TOOL_DEFINITIONS = build_tool_definitions(
+    include_custom_prompt=True,
+    include_poke=True,
+)
 
 _DATE_ONLY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
@@ -489,6 +513,52 @@ def _execute_clear_user_prompt(
     )
 
 
+async def _execute_poke_user(
+    args: dict[str, Any],
+    session_key: str,
+    store: ConversationStore,
+) -> str:
+    del args, store
+    self_id, separator, user_id = session_key.partition(":")
+    if not separator or not self_id or not user_id:
+        return _error("无法解析当前会话用户")
+
+    try:
+        target_id = int(user_id)
+    except ValueError:
+        return _error("当前会话用户 ID 无效")
+
+    try:
+        bot = get_bot(self_id)
+    except Exception:
+        return _error("机器人当前未连接，无法戳一戳")
+
+    try:
+        await bot.call_api("friend_poke", user_id=target_id)
+        api = "friend_poke"
+    except Exception as first_error:
+        try:
+            await bot.call_api("send_poke", user_id=target_id)
+            api = "send_poke"
+        except Exception as second_error:
+            logger.warning(
+                f"戳一戳 API 调用失败：friend_poke={first_error!r} "
+                f"send_poke={second_error!r}"
+            )
+            return _error(
+                f"戳一戳失败：{second_error.__class__.__name__}"
+            )
+
+    return json.dumps(
+        {
+            "poked": True,
+            "user_id": target_id,
+            "api": api,
+        },
+        ensure_ascii=False,
+    )
+
+
 async def execute_tool(
     name: str,
     arguments: str | dict[str, Any],
@@ -521,6 +591,8 @@ async def execute_tool(
                 TOOL_CLEAR_USER_PROMPT: _execute_clear_user_prompt,
             }
         )
+    if plugin_config.deepseek_poke_enabled:
+        handlers[TOOL_POKE_USER] = _execute_poke_user
     handler = handlers.get(name)
     if handler is None:
         logger.warning(
@@ -541,6 +613,8 @@ async def execute_tool(
 
     try:
         result = handler(args, session_key, store)
+        if inspect.isawaitable(result):
+            result = await result
     except Exception:
         logger.exception(
             f"[tool] error session={session_key} name={name} "

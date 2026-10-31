@@ -12,6 +12,7 @@
 - 历史聊天记录复用同一数据库，模型可调用 `query_chat_history` 查询过去聊过什么
 - 长期记忆：自动保存用户信息、偏好、习惯等，并在后续对话中注入 system 指令
 - 单个用户自定义 system 提示词：通过工具保存专属人设、语气或回复风格
+- 戳一戳：模型可调用工具戳用户；用户戳机器人时也会用 AI 回应
 - 连续消息聚合：用户分多次发送的一句话会合并；AI 判断不完整时先不回复，等提问完整
 - 回复抖动：首条回复前有随机停顿，多条回复之间也有随机间隔
 - 支持私聊图片理解：图片经 Files API 上传后以 `file_id` 交给 `deepseek-flash` 分析
@@ -46,6 +47,7 @@ DEEPSEEK_MODEL=deepseek-flash
 DEEPSEEK_DB_PATH=data/nonebot_plugin_aichat_deepseek/chat.db
 DEEPSEEK_TOOLS_ENABLED=true
 DEEPSEEK_TOOL_MAX_ROUNDS=3
+DEEPSEEK_POKE_ENABLED=true
 DEEPSEEK_MEMORY_ENABLED=true
 DEEPSEEK_MEMORY_MAX_ITEMS=20
 DEEPSEEK_MEMORY_MAX_CHARS=1000
@@ -76,6 +78,7 @@ DEEPSEEK_REPLY_INTERVAL=1.0
 | `DEEPSEEK_DB_PATH` | `str` | `data/nonebot_plugin_aichat_deepseek/chat.db` | SQLite 数据库路径，相对路径基于机器人启动目录 |
 | `DEEPSEEK_TOOLS_ENABLED` | `bool` | `True` | 是否允许模型调用工具 |
 | `DEEPSEEK_TOOL_MAX_ROUNDS` | `int` | `3` | 单次回复最多允许几轮工具调用 |
+| `DEEPSEEK_POKE_ENABLED` | `bool` | `True` | 是否启用戳一戳工具和戳一戳事件回应 |
 | `DEEPSEEK_MEMORY_ENABLED` | `bool` | `True` | 是否启用长期记忆的保存、查询和注入 |
 | `DEEPSEEK_MEMORY_MAX_ITEMS` | `int` | `20` | 每次最多注入多少条长期记忆 |
 | `DEEPSEEK_MEMORY_MAX_CHARS` | `int` | `1000` | 注入长期记忆的字符预算 |
@@ -239,6 +242,21 @@ DEEPSEEK_REPLY_INTERVAL=1.0
 - 修改或清除自定义提示词会让缓存前缀变化一次，属于正常现象；
 - 提示词只影响当前用户，不会影响其他私聊用户。
 
+## 戳一戳
+
+启用 `DEEPSEEK_POKE_ENABLED` 后支持两种行为：
+
+1. **模型主动戳用户**：用户明确要求“戳我一下”“提醒我”时，模型调用 `poke_user` 工具。
+2. **用户戳机器人**：私聊中用户戳机器人时，插件会生成一条 AI 回复，并把这次互动写入当前对话历史。
+
+实现说明：
+
+- `poke_user` 只作用于当前私聊用户，不接受其他用户 ID；
+- 优先调用 OneBot V11 的 `friend_poke`，失败时回退到 `send_poke`；
+- 只响应私聊里 `target_id == self_id` 的戳一戳事件，群聊戳一戳不处理；
+- 戳一戳回应会走正常的模型调用、system 提示词、自定义人设和分条发送流程；
+- 如果当前 OneBot 实现不支持相关 API，工具会返回错误，不会影响普通聊天。
+
 ## 工具调用
 
 启用 `DEEPSEEK_TOOLS_ENABLED` 后，模型会获得以下工具（记忆相关工具还要求 `DEEPSEEK_MEMORY_ENABLED=true`，自定义提示词工具要求 `DEEPSEEK_CUSTOM_PROMPT_ENABLED=true`）：
@@ -252,6 +270,7 @@ DEEPSEEK_REPLY_INTERVAL=1.0
 | `set_user_system_prompt` | 保存当前用户专属的 system 提示词 |
 | `get_user_system_prompt` | 查看当前用户的自定义提示词 |
 | `clear_user_system_prompt` | 清除当前用户的自定义提示词 |
+| `poke_user` | 戳一戳当前私聊用户 |
 
 ### `query_chat_history`
 
@@ -313,6 +332,10 @@ DEEPSEEK_REPLY_INTERVAL=1.0
 ### `clear_user_system_prompt`
 
 无参数，清除当前用户的自定义提示词并恢复默认人设。
+
+### `poke_user`
+
+无参数，戳一戳当前私聊用户。优先调用 `friend_poke`，失败时尝试 `send_poke`。
 
 ## 命令
 
